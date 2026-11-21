@@ -21,16 +21,16 @@ ratbox::Settings neutral() {
     return s;
 }
 
-float sineRms(double rate, float hz, float amplitude, const ratbox::Settings& settings) {
+float sineRms(double rate, float hz, float amplitude, const ratbox::Settings& settings, int blocks = 96) {
     ratbox::VocalChain dsp;
     dsp.prepare(rate);
     std::array<float, block> samples{};
     double energy = 0;
-    for (int b = 0; b < 96; ++b) {
+    for (int b = 0; b < blocks; ++b) {
         for (int i = 0; i < block; ++i)
             samples[i] = amplitude * std::sin(6.283185307 * hz * (b * block + i) / rate);
         dsp.process(samples.data(), nullptr, block, settings);
-        if (b >= 80)
+        if (b >= blocks - 16)
             for (const auto x : samples) energy += x * x;
     }
     return static_cast<float>(std::sqrt(energy / (16 * block)));
@@ -62,6 +62,10 @@ void testLowCutAndDynamics(double rate) {
             "Noise control should attenuate quiet background");
     require(sineRms(rate, 440, .12f, cleaned) > .99f * sineRms(rate, 440, .12f, dry),
             "Noise control should preserve clear vocal-level signal");
+    const int sustainedBlocks = static_cast<int>(6 * rate / block);
+    require(sineRms(rate, 440, .026f, cleaned, sustainedBlocks) >
+            .99f * sineRms(rate, 440, .026f, dry, sustainedBlocks),
+            "Noise control should keep a quiet tonal note above the learnable floor");
 
     cleaned = dry;
     cleaned.deess = 1;
@@ -77,7 +81,7 @@ void testLowCutAndDynamics(double rate) {
             "Compressor should reduce high levels");
 }
 
-void testBackgroundAndOrder(double rate) {
+void testBackgroundNoise(double rate, float peak) {
     ratbox::VocalChain clean, reference;
     clean.prepare(rate);
     reference.prepare(rate);
@@ -91,7 +95,7 @@ void testBackgroundAndOrder(double rate) {
     for (int b = 0; b < blocks; ++b) {
         for (int i = 0; i < block; ++i) {
             random = 1664525u * random + 1013904223u;
-            dry[i] = wet[i] = .011f * (static_cast<float>(random >> 16) / 32768.f - 1.f);
+            dry[i] = wet[i] = peak * (static_cast<float>(random >> 16) / 32768.f - 1.f);
         }
         clean.process(wet.data(), nullptr, block, enabled);
         reference.process(dry.data(), nullptr, block, disabled);
@@ -102,9 +106,13 @@ void testBackgroundAndOrder(double rate) {
             }
     }
     require(wetEnergy < .08 * dryEnergy, "Noise floor tracking should attenuate steady broadband noise");
+}
 
+void testSignalOrder(double rate) {
+    ratbox::VocalChain clean, reference;
     clean.prepare(rate);
     reference.prepare(rate);
+    std::array<float, block> wet{}, dry{};
     auto flatComp = neutral();
     flatComp.comp = 1;
     auto shapedComp = flatComp;
@@ -117,6 +125,34 @@ void testBackgroundAndOrder(double rate) {
         flat = reference.process(dry.data(), nullptr, block, flatComp);
     }
     require(shaped.comp > flat.comp + .1f, "Compression should react to tonal focus upstream");
+}
+
+void testNoiseOnset(double rate) {
+    ratbox::VocalChain clean, reference;
+    clean.prepare(rate);
+    reference.prepare(rate);
+    const auto dry = neutral();
+    auto reduced = dry;
+    reduced.noise = 1.f;
+    std::array<float, block> wet{}, flat{};
+    const int quietBlocks = static_cast<int>(rate / block);
+    for (int b = 0; b < quietBlocks; ++b) {
+        clean.process(wet.data(), nullptr, block, reduced);
+        reference.process(flat.data(), nullptr, block, dry);
+    }
+
+    const int onset = static_cast<int>(rate * .002);
+    for (int i = 0; i < onset; ++i)
+        wet[i] = flat[i] = .25f * std::sin(6.283185307 * 1000 * i / rate);
+    clean.process(wet.data(), nullptr, onset, reduced);
+    reference.process(flat.data(), nullptr, onset, dry);
+    float reducedEnergy = 0.f, dryEnergy = 0.f;
+    for (int i = 0; i < onset; ++i) {
+        reducedEnergy += wet[i] * wet[i];
+        dryEnergy += flat[i] * flat[i];
+    }
+    require(reducedEnergy > .70f * dryEnergy,
+            "Noise reduction should preserve short, strong vocal onsets after a pause");
 }
 
 void testReverb(double rate) {
@@ -176,7 +212,10 @@ void testBypassAndSafety(double rate) {
 int main() {
     for (const auto rate : {44100., 48000., 96000.}) {
         testLowCutAndDynamics(rate);
-        testBackgroundAndOrder(rate);
+        testBackgroundNoise(rate, .011f);
+        testBackgroundNoise(rate, .026f);
+        testSignalOrder(rate);
+        testNoiseOnset(rate);
         testReverb(rate);
         testBypassAndSafety(rate);
     }

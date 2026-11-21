@@ -25,7 +25,7 @@ cmake --build build --config Release --parallel 2
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-CMake fetches JUCE 8.0.6. Copy the entire `build/RatBox26_artefacts/Release/VST3/RatBox26.vst3` bundle to `C:\Program Files\Common Files\VST3`, then rescan plugins in the DAW. The Windows GitHub Actions workflow builds the x64 VST3, runs DSP tests, and loads the built plugin in a smoke-test host before uploading the bundle. The host checks mono, stereo, mono-to-stereo, and clearing audio after a processing restart.
+CMake fetches JUCE 8.0.6. Copy the entire `build/RatBox26_artefacts/Release/VST3/RatBox26.vst3` bundle to `C:\Program Files\Common Files\VST3`, then rescan plugins in the DAW. The Windows GitHub Actions workflow builds the x64 VST3, runs DSP tests, and loads the built plugin in a smoke-test host before uploading the bundle. The host checks mono, stereo, mono-to-stereo, dry passthrough while the plugin is inactive, and clearing audio after a processing restart.
 
 ## DSP checks without JUCE
 

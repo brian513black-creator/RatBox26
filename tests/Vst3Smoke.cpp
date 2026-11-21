@@ -67,8 +67,6 @@ int main(int argc, char** argv) {
         check(component->activateBus(kAudio, kOutput, 0, true) == kResultOk, "activate output bus");
         ProcessSetup setup{kRealtime, kSample32, 256, 48000.0};
         check(processor->setupProcessing(setup) == kResultOk, "setup process");
-        check(component->setActive(true) == kResultOk, "activate");
-        check(processor->setProcessing(true) == kResultOk, "start processing");
 
         std::array<float, 256> l{}, r{}, outL{}, outR{};
         float* inputs[]{l.data(), r.data()};
@@ -85,6 +83,20 @@ int main(int argc, char** argv) {
         data.numInputs = data.numOutputs = 1;
         data.inputs = &input;
         data.outputs = &output;
+        const auto checkInactiveAudio = [&] {
+            l.fill(.12f);
+            r.fill(.23f);
+            input.silenceFlags = 0;
+            check(processor->process(data) == kResultOk, "process while inactive");
+            for (int ch = 0; ch < outputChannels; ++ch)
+                for (int i = 0; i < 256; ++i)
+                    check(outputs[ch][i] == (ch == 1 && inputChannels == 2 ? .23f : .12f),
+                          "inactive processing should pass dry audio");
+        };
+        checkInactiveAudio();
+
+        check(component->setActive(true) == kResultOk, "activate");
+        check(processor->setProcessing(true) == kResultOk, "start processing");
         std::array<float, 2> energy{};
         float stereoDifference = 0.f;
         for (int b = 0; b < 25; ++b) {
@@ -116,7 +128,8 @@ int main(int argc, char** argv) {
                     check(outputs[ch][i] == 0.f, "reset clears previous audio");
         }
         processor->setProcessing(false);
-        component->setActive(false);
+        check(component->setActive(false) == kResultOk, "deactivate");
+        checkInactiveAudio();
         processor->release();
         component->terminate();
         component->release();

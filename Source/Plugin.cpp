@@ -16,7 +16,7 @@ constexpr std::array<Control, knobCount> controls{{
     {"deess", "De-ess", "%", 0, 100, 30, 1},
     {"character", "Character", "%", 0, 100, 32, 1},
     {"comp", "Compression", "%", 0, 100, 34, 1},
-    {"space", "Reverb Mix", "%", 0, 100, 15, 1},
+    {"space", "Reverb Level", "%", 0, 100, 15, 1},
     {"decay", "Decay", " s", .35f, 5.f, 1.65f, .01f},
     {"duck", "Vocal Ducking", "%", 0, 100, 65, 1},
     {"output", "Output", " dB", -18, 12, 0, .1f},
@@ -68,11 +68,15 @@ public:
     juce::AudioProcessorEditor* createEditor() override;
     void prepareToPlay(double sampleRate, int) override {
         dsp.prepare(sampleRate);
-        for (auto& meter : meters) meter.store(0, std::memory_order_relaxed);
+        clearMeters();
+        prepared = true;
     }
-    void releaseResources() override {}
+    void releaseResources() override { prepared = false; }
     void reset() override {
         dsp.reset();
+        clearMeters();
+    }
+    void clearMeters() {
         for (auto& meter : meters) meter.store(0, std::memory_order_relaxed);
     }
     bool isBusesLayoutSupported(const BusesLayout& layout) const override {
@@ -87,6 +91,11 @@ public:
     void processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&) override {
         juce::ScopedNoDenormals guard;
         if (buffer.getNumChannels() == 0 || buffer.getNumSamples() == 0) return;
+        if (getTotalNumInputChannels() == 1 && getTotalNumOutputChannels() == 2)
+            buffer.copyFrom(1, 0, buffer, 0, 0, buffer.getNumSamples());
+        // Some VST3 hosts send audio before activating the processor.
+        if (!prepared) return;
+
         const auto value = [this](size_t i) {
             const auto raw = values[i]->load(std::memory_order_relaxed);
             const auto& control = controls[i];
@@ -95,8 +104,6 @@ public:
         const ratbox::Settings settings{ value(0) * .01f, value(1) * .01f, value(2) * .01f,
             value(3) * .01f, value(4) * .01f, value(5), value(6) * .01f, value(7),
             bypass->load(std::memory_order_relaxed) > .5f, value(8), value(9), value(10) };
-        if (getTotalNumInputChannels() == 1 && getTotalNumOutputChannels() == 2)
-            buffer.copyFrom(1, 0, buffer, 0, 0, buffer.getNumSamples());
         const auto result = dsp.process(buffer.getWritePointer(0),
             buffer.getNumChannels() > 1 ? buffer.getWritePointer(1) : nullptr,
             buffer.getNumSamples(), settings);
@@ -120,6 +127,7 @@ public:
 
 private:
     ratbox::VocalChain dsp;
+    bool prepared = false;
     std::array<std::atomic<float>*, knobCount> values{};
     std::atomic<float>* bypass = nullptr;
 };
@@ -191,6 +199,7 @@ public:
         setResizable(true, true);
         setResizeLimits(760, 710, 1100, 940);
         setSize(840, 790);
+        processor.clearMeters();
         startTimerHz(30);
     }
     ~Editor() override {

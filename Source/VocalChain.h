@@ -33,6 +33,7 @@ public:
         wetHigh = filter(6100);
         roomDamping = filter(2830);
         fast = time(.003f);
+        noiseOpen = time(.00025f);
         release = time(.085f);
         compAttack = time(.012f);
         compRelease = time(.105f);
@@ -122,14 +123,16 @@ public:
             const float voiceLevel = std::sqrt(levelPower);
             const float highLevel = std::sqrt(highPower);
 
-            // Estimate stationary background from quiet passages and freeze on speech.
+            // Allow a higher floor for hiss while keeping low-frequency vocal
+            // notes above the floor-learning threshold.
             const float candidate = std::clamp(voiceLevel, .0002f, .035f);
-            if (candidate < floor || voiceLevel < std::max(.016f, floor * 2.4f))
+            const float learningThreshold = highLevel > .55f * voiceLevel ? .030f : .016f;
+            if (candidate < floor || voiceLevel < std::max(learningThreshold, floor * 2.4f))
                 follow(floor, candidate, candidate < floor ? floorFall : floorRise);
             const float snr = voiceLevel / std::max(floor, .0015f);
             const float speech = std::clamp((snr - 1.25f) / 2.25f, 0.f, 1.f);
             const float noiseTarget = 1.f - .95f * target.noise * (1.f - speech * speech * (3.f - 2.f * speech));
-            follow(noiseGain, noiseTarget, noiseTarget > noiseGain ? fast : release);
+            follow(noiseGain, noiseTarget, noiseTarget > noiseGain ? noiseOpen : release);
 
             const float sRatio = highLevel / std::max(voiceLevel, .008f);
             const float sReduction = target.deess * .78f *
@@ -256,6 +259,7 @@ private:
     float rate = 48000, lowCutG = 0, presence = 0, air = 0, sibilance = 0;
     bool initialized = false;
     float wetLow = 0, wetHigh = 0, roomDamping = 0, fast = 0, release = 0, smooth = 0;
+    float noiseOpen = 0;
     float compAttack = 0, compRelease = 0, floorRise = 0, floorFall = 0, duckRelease = 0;
     float levelPower = 0, highPower = 0, compPower = 0, floor = .0015f;
     float noiseGain = 1, deessGain = 0, compGain = 1, duckGain = 1;
