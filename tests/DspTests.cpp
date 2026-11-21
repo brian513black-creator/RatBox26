@@ -38,6 +38,15 @@ float sineRms(double rate, float hz, float amplitude, const ratbox::Settings& se
 
 void testLowCutAndDynamics(double rate) {
     const auto dry = neutral();
+    auto bypassed = dry;
+    bypassed.bypass = true;
+    for (const auto cutoff : {70.f, 350.f}) {
+        auto filtered = dry;
+        filtered.lowCut = cutoff;
+        const auto ratio = sineRms(rate, cutoff, .2f, filtered) / sineRms(rate, cutoff, .2f, bypassed);
+        require(std::abs(ratio - .7071f) < .025f, "Low cut should be about -3 dB at its selected frequency");
+    }
+
     auto filtered = dry;
     filtered.lowCut = 350;
     require(sineRms(rate, 125, .2f, filtered) < .2f * sineRms(rate, 125, .2f, dry),
@@ -79,6 +88,35 @@ void testLowCutAndDynamics(double rate) {
     cleaned.comp = 1;
     require(sineRms(rate, 440, .5f, cleaned) < .65f * sineRms(rate, 440, .5f, dry),
             "Compressor should reduce high levels");
+}
+
+void testFocusFrequencyAndOutput(double rate) {
+    const auto dry = neutral();
+    auto lowFocus = dry;
+    lowFocus.focusHz = 150.f;
+    lowFocus.focusDb = 6.f;
+    auto highFocus = lowFocus;
+    highFocus.focusHz = 500.f;
+    require(sineRms(rate, 150, .2f, lowFocus) > 1.5f * sineRms(rate, 150, .2f, highFocus),
+            "Low focus frequency should target the low end of the EQ band");
+    require(sineRms(rate, 500, .2f, highFocus) > 1.5f * sineRms(rate, 500, .2f, lowFocus),
+            "High focus frequency should target the high end of the EQ band");
+
+    auto neutralControls = dry;
+    neutralControls.focusHz = 500.f;
+    neutralControls.decay = 5.f;
+    neutralControls.duck = 1.f;
+    const float reference = sineRms(rate, 500, .2f, dry);
+    require(std::abs(sineRms(rate, 500, .2f, neutralControls) - reference) < 1.e-6f,
+            "Focus frequency, decay and ducking should be inaudible with their levels at zero");
+
+    for (const auto db : {-18.f, 12.f}) {
+        auto adjusted = dry;
+        adjusted.output = db;
+        const float ratio = sineRms(rate, 500, .2f, adjusted) / reference;
+        require(std::abs(ratio - std::pow(10.f, db / 20.f)) < .001f,
+                "Output trim should apply the selected decibel gain");
+    }
 }
 
 void testBackgroundNoise(double rate, float peak) {
@@ -191,6 +229,46 @@ void testReverb(double rate) {
     require(duckedDifference < .4f * unduckedDifference, "Smart ducking should reduce reverb under the vocal");
 }
 
+void testReverbLevelAndDecay(double rate) {
+    const auto dry = neutral();
+    auto longRoom = dry;
+    longRoom.space = 1.f;
+    longRoom.decay = 5.f;
+    auto quietRoom = longRoom;
+    quietRoom.space = .4f;
+    auto shortRoom = longRoom;
+    shortRoom.decay = .35f;
+    const std::array settings{dry, longRoom, quietRoom, shortRoom};
+    std::array<ratbox::VocalChain, settings.size()> chains;
+    std::array<std::array<float, block>, settings.size()> audio{};
+    for (auto& chain : chains) chain.prepare(rate);
+
+    double longEnergy = 0., shortEnergy = 0., levelError = 0.;
+    const int blocks = static_cast<int>(.8 * rate / block);
+    const int tailStart = static_cast<int>(.4 * rate / block);
+    for (int b = 0; b < blocks; ++b) {
+        for (size_t i = 0; i < chains.size(); ++i) {
+            auto& signal = audio[i];
+            signal.fill(0.f);
+            if (b == 0) signal[0] = .6f;
+            chains[i].process(signal.data(), nullptr, block, settings[i]);
+        }
+        if (b < tailStart) continue;
+        for (int i = 0; i < block; ++i) {
+            const double longTail = audio[1][i] - audio[0][i];
+            const double quietTail = audio[2][i] - audio[0][i];
+            const double shortTail = audio[3][i] - audio[0][i];
+            const double residual = quietTail - .4 * longTail;
+            longEnergy += longTail * longTail;
+            shortEnergy += shortTail * shortTail;
+            levelError += residual * residual;
+        }
+    }
+    require(longEnergy > 1.e-5 && longEnergy > 20. * shortEnergy,
+            "Long decay should preserve substantially more late reverb energy than short decay");
+    require(levelError < 1.e-6 * longEnergy, "Reverb level should scale the wet signal");
+}
+
 void testBypassAndSafety(double rate) {
     ratbox::VocalChain dsp;
     dsp.prepare(rate);
@@ -212,11 +290,13 @@ void testBypassAndSafety(double rate) {
 int main() {
     for (const auto rate : {44100., 48000., 96000.}) {
         testLowCutAndDynamics(rate);
+        testFocusFrequencyAndOutput(rate);
         testBackgroundNoise(rate, .011f);
         testBackgroundNoise(rate, .026f);
         testSignalOrder(rate);
         testNoiseOnset(rate);
         testReverb(rate);
+        testReverbLevelAndDecay(rate);
         testBypassAndSafety(rate);
     }
     std::cout << "Vocal chain checks passed at 44.1, 48, and 96 kHz\n";

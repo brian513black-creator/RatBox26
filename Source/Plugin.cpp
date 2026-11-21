@@ -1,4 +1,6 @@
 #include <juce_audio_utils/juce_audio_utils.h>
+#include <locale>
+#include <sstream>
 #include "VocalChain.h"
 
 namespace {
@@ -25,14 +27,36 @@ constexpr std::array<Control, knobCount> controls{{
     {"focusDb", "Focus Gain", " dB", -6, 6, 0, .1f}
 }};
 
-APVTS::ParameterLayout makeParameters() {
-    APVTS::ParameterLayout layout;
-    for (const auto& c : controls) {
-        layout.add(std::make_unique<juce::AudioParameterFloat>(
+class NumericParameter final : public juce::AudioParameterFloat {
+public:
+    explicit NumericParameter(const Control& c)
+        : AudioParameterFloat(
             juce::ParameterID{c.id, 1}, c.label,
             juce::NormalisableRange<float>{c.min, c.max, c.step}, c.initial,
-            juce::AudioParameterFloatAttributes().withLabel(c.unit)));
+            juce::AudioParameterFloatAttributes().withLabel(juce::String(c.unit).trim())) {}
+
+    float getValueForText(const juce::String& text) const override {
+        auto number = text.trim();
+        const auto unit = getLabel();
+        if (unit.isNotEmpty() && number.endsWithIgnoreCase(unit))
+            number = number.dropLastCharacters(unit.length()).trimEnd();
+
+        std::istringstream input(number.toStdString());
+        input.imbue(std::locale::classic());
+        double parsed = 0.0;
+        if (!(input >> parsed) || !input.eof() || !std::isfinite(parsed))
+            return convertTo0to1(get());
+
+        const auto& limits = getNormalisableRange();
+        return convertTo0to1(static_cast<float>(std::clamp(parsed,
+            static_cast<double>(limits.start), static_cast<double>(limits.end))));
     }
+};
+
+APVTS::ParameterLayout makeParameters() {
+    APVTS::ParameterLayout layout;
+    for (const auto& c : controls)
+        layout.add(std::make_unique<NumericParameter>(c));
     layout.add(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{"bypass", 1}, "Bypass", false));
     return layout;
