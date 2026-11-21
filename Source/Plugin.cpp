@@ -145,7 +145,7 @@ public:
     void drawRotarySlider(juce::Graphics& g, int x, int y, int w, int h, float pos,
                           float first, float last, juce::Slider& slider) override {
         auto bounds = juce::Rectangle<float>{static_cast<float>(x), static_cast<float>(y),
-            static_cast<float>(w), static_cast<float>(h)}.reduced(7.f);
+            static_cast<float>(w), static_cast<float>(h)}.reduced(5.f);
         const float radius = juce::jmin(bounds.getWidth(), bounds.getHeight()) * .45f;
         const auto center = bounds.getCentre();
         const auto accent = slider.findColour(juce::Slider::rotarySliderFillColourId);
@@ -157,6 +157,12 @@ public:
             g.strokePath(path, juce::PathStrokeType{3.f, juce::PathStrokeType::curved,
                                                    juce::PathStrokeType::rounded});
         };
+        if (slider.hasKeyboardFocus(true)) {
+            g.setColour(accent);
+            const float focusRadius = radius + 4.f;
+            g.drawEllipse(center.x - focusRadius, center.y - focusRadius,
+                          2.f * focusRadius, 2.f * focusRadius, 1.5f);
+        }
         arc(first, last, line);
         if (pos > 0.f) arc(first, angle, accent);
         const float cap = radius - 8.f;
@@ -173,6 +179,26 @@ public:
     }
 };
 
+class Knob final : public juce::Slider {
+    void lookAndFeelChanged() override {
+        juce::Slider::lookAndFeelChanged();
+        // The value label remains clickable. The knob itself is the tab stop.
+        for (auto* child : getChildren())
+            if (auto* valueLabel = dynamic_cast<juce::Label*>(child))
+                valueLabel->setWantsKeyboardFocus(false);
+    }
+    bool keyPressed(const juce::KeyPress& key) override {
+        if (key == juce::KeyPress::returnKey && hasKeyboardFocus(false)) {
+            showTextBox();
+            return true;
+        }
+        return juce::Slider::keyPressed(key);
+    }
+    void focusGained(FocusChangeType) override { repaint(); }
+    void focusLost(FocusChangeType) override { repaint(); }
+    void focusOfChildComponentChanged(FocusChangeType) override { repaint(); }
+};
+
 class Editor final : public juce::AudioProcessorEditor, private juce::Timer {
 public:
     explicit Editor(Processor& p) : AudioProcessorEditor(p), processor(p) {
@@ -182,6 +208,8 @@ public:
             auto& knob = knobs[i];
             knob.setLookAndFeel(&look);
             knob.setName(c.label);
+            knob.setTitle(c.label);
+            knob.setWantsKeyboardFocus(true);
             knob.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
             knob.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 84, 23);
             knob.setColour(juce::Slider::rotarySliderFillColourId, i >= 4 && i <= 6 ? amber : mint);
@@ -193,12 +221,14 @@ public:
             knob.setDoubleClickReturnValue(true, c.initial);
         }
         bypass.setButtonText("Bypass");
+        bypass.setName("Bypass");
+        bypass.setTitle("Bypass");
         bypass.setColour(juce::ToggleButton::textColourId, ink);
         bypass.setColour(juce::ToggleButton::tickColourId, mint);
         addAndMakeVisible(bypass);
         setResizable(true, true);
-        setResizeLimits(760, 710, 1100, 940);
-        setSize(840, 790);
+        setResizeLimits(760, 620, 1100, 940);
+        setSize(840, 680);
         processor.clearMeters();
         startTimerHz(30);
     }
@@ -208,11 +238,11 @@ public:
     }
 
     void resized() override {
-        bypass.setBounds(getWidth() - 112, 34, 86, 32);
+        bypass.setBounds(getWidth() - 112, 28, 86, 32);
         for (int row = 0; row < 3; ++row)
             for (int column = 0; column < columnCount(row); ++column) {
                 const auto cell = controlCell(row, column);
-                knobs[controlIndex(row, column)].setBounds(cell.withTrimmedTop(24).reduced(8, 2));
+                knobs[controlIndex(row, column)].setBounds(cell.withTrimmedTop(21).reduced(8, 2));
             }
     }
 
@@ -221,9 +251,9 @@ public:
         g.setGradientFill({juce::Colour{0xff1d302b}, 0.f, 0.f, base, 0.f, 200.f, false});
         g.fillRect(getLocalBounds().withHeight(200));
         g.setColour(mint);
-        g.fillRoundedRectangle(24.f, 32.f, 4.f, 57.f, 2.f);
-        write(g, "RatBox26", {39, 26, 350, 46}, 36.f, ink, true);
-        write(g, "VOCAL CHANNEL STRIP", {41, 72, 350, 18}, 12.f, mint, true);
+        g.fillRoundedRectangle(24.f, 26.f, 4.f, 52.f, 2.f);
+        write(g, "RatBox26", {39, 20, 350, 46}, 36.f, ink, true);
+        write(g, "VOCAL CHANNEL STRIP", {41, 64, 350, 18}, 12.f, mint, true);
 
         for (int row = 0; row < 3; ++row) {
             const auto panel = section(row);
@@ -232,7 +262,7 @@ public:
             g.setColour(line);
             g.drawRoundedRectangle(panel.toFloat(), 14.f, 1.f);
             constexpr const char* sectionNames[]{"CLEANUP", "TONAL FOCUS & DYNAMICS", "SPACE & OUTPUT"};
-            write(g, sectionNames[row], panel.reduced(18, 0).removeFromTop(34),
+            write(g, sectionNames[row], panel.reduced(18, 0).removeFromTop(30),
                   12.f, row == 2 ? amber : mint, true);
             for (int col = 0; col < columnCount(row); ++col) {
                 const auto i = controlIndex(row, col);
@@ -242,12 +272,12 @@ public:
                     g.drawVerticalLine(cell.getX(), static_cast<float>(cell.getY() + 6),
                                        static_cast<float>(cell.getBottom() - 8));
                 }
-                write(g, controls[i].label, cell.withHeight(23), 14.f, ink, true,
+                write(g, controls[i].label, cell.withHeight(20), 14.f, ink, true,
                       juce::Justification::centred);
             }
         }
 
-        auto metrics = getLocalBounds().reduced(24, 0).withY(getHeight() - 92).withHeight(65);
+        auto metrics = getLocalBounds().reduced(24, 0).withY(getHeight() - 78).withHeight(60);
         g.setColour(card);
         g.fillRoundedRectangle(metrics.toFloat(), 12.f);
         metrics.reduce(14, 10);
@@ -264,11 +294,11 @@ private:
         return groups[row][column];
     }
     juce::Rectangle<int> section(int row) const {
-        const int height = (getHeight() - 234) / 3;
-        return {24, 109 + row * (height + 11), getWidth() - 48, height};
+        const int height = (getHeight() - 200) / 3;
+        return {24, 95 + row * (height + 9), getWidth() - 48, height};
     }
     juce::Rectangle<int> controlCell(int row, int column) const {
-        auto band = section(row).reduced(12, 0).withTrimmedTop(39).withTrimmedBottom(9);
+        auto band = section(row).reduced(12, 0).withTrimmedTop(32).withTrimmedBottom(7);
         const int width = band.getWidth() / columnCount(row);
         return {band.getX() + column * width, band.getY(), width, band.getHeight()};
     }
@@ -302,7 +332,7 @@ private:
 
     Processor& processor;
     KnobLook look;
-    std::array<juce::Slider, knobCount> knobs;
+    std::array<Knob, knobCount> knobs;
     std::array<std::unique_ptr<APVTS::SliderAttachment>, knobCount> bindings;
     juce::ToggleButton bypass;
     APVTS::ButtonAttachment bypassBinding{processor.parameters, "bypass", bypass};
