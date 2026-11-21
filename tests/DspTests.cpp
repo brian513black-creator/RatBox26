@@ -92,6 +92,17 @@ void testLowCutAndDynamics(double rate) {
 
 void testFocusFrequencyAndOutput(double rate) {
     const auto dry = neutral();
+    auto boost = dry;
+    boost.focusDb = 6.f;
+    auto cut = boost;
+    cut.focusDb = -6.f;
+    for (const auto hz : {184.f, 427.f}) {
+        const float flatRms = sineRms(rate, hz, .2f, dry);
+        const float corrected = sineRms(rate, hz, .2f, boost) * sineRms(rate, hz, .2f, cut);
+        require(std::abs(corrected / (flatRms * flatRms) - 1.f) < .02f,
+                "Matching focus boosts and cuts should cancel on both shoulders of the bell");
+    }
+
     auto lowFocus = dry;
     lowFocus.focusHz = 150.f;
     lowFocus.focusDb = 6.f;
@@ -117,6 +128,32 @@ void testFocusFrequencyAndOutput(double rate) {
         require(std::abs(ratio - std::pow(10.f, db / 20.f)) < .001f,
                 "Output trim should apply the selected decibel gain");
     }
+}
+
+void testStereoDeess(double rate) {
+    ratbox::VocalChain tested, reference;
+    tested.prepare(rate);
+    reference.prepare(rate);
+    const auto dry = neutral();
+    auto deessed = dry;
+    deessed.deess = 1.f;
+    std::array<float, block> left{}, right{}, dryLeft{}, dryRight{};
+    double energy = 0., dryEnergy = 0.;
+    for (int b = 0; b < 96; ++b) {
+        for (int i = 0; i < block; ++i) {
+            const double phase = 6.283185307 * (b * block + i) / rate;
+            left[i] = dryLeft[i] = .65f * std::sin(220. * phase);
+            right[i] = dryRight[i] = .18f * std::sin(8500. * phase);
+        }
+        tested.process(left.data(), right.data(), block, deessed);
+        reference.process(dryLeft.data(), dryRight.data(), block, dry);
+        if (b >= 80)
+            for (int i = 0; i < block; ++i) {
+                energy += right[i] * right[i];
+                dryEnergy += dryRight[i] * dryRight[i];
+            }
+    }
+    require(energy < .49 * dryEnergy, "A loud low tone in one channel should not mask sibilance in the other");
 }
 
 void testBackgroundNoise(double rate, float peak) {
@@ -269,6 +306,33 @@ void testReverbLevelAndDecay(double rate) {
     require(levelError < 1.e-6 * longEnergy, "Reverb level should scale the wet signal");
 }
 
+void testCharacterFoldback() {
+    constexpr int rate = 44100;
+    constexpr int frequency = 13000;
+    constexpr int foldedThird = rate - 3 * frequency;
+    ratbox::VocalChain dsp;
+    dsp.prepare(rate);
+    auto settings = neutral();
+    settings.character = 1.f;
+    std::array<float, block> audio{};
+    double fundamentalSin = 0., fundamentalCos = 0., foldSin = 0., foldCos = 0.;
+    for (int start = 0; start < rate; start += block) {
+        const int frames = std::min(block, rate - start);
+        for (int i = 0; i < frames; ++i)
+            audio[i] = .8f * std::sin(6.283185307 * frequency * (start + i) / rate);
+        dsp.process(audio.data(), nullptr, frames, settings);
+        for (int i = std::max(0, rate / 2 - start); i < frames; ++i) {
+            const double phase = 6.283185307 * (start + i) / rate;
+            fundamentalSin += audio[i] * std::sin(frequency * phase);
+            fundamentalCos += audio[i] * std::cos(frequency * phase);
+            foldSin += audio[i] * std::sin(foldedThird * phase);
+            foldCos += audio[i] * std::cos(foldedThird * phase);
+        }
+    }
+    require(std::hypot(foldSin, foldCos) < .004 * std::hypot(fundamentalSin, fundamentalCos),
+            "Character should keep high-frequency foldback below -48 dBc on a hot 13 kHz input");
+}
+
 void testBypassAndSafety(double rate) {
     ratbox::VocalChain dsp;
     dsp.prepare(rate);
@@ -279,6 +343,24 @@ void testBypassAndSafety(double rate) {
     dsp.process(samples.data(), nullptr, block, s);
     require(samples.front() == .22f && samples.back() == .22f,
             "Restored bypass should pass dry input from the first sample");
+    s.bypass = false;
+    const int fadeBlocks = static_cast<int>(rate * .012 / block) + 1;
+    for (int b = 0; b < fadeBlocks; ++b) {
+        samples.fill(.22f);
+        dsp.process(samples.data(), nullptr, block, s);
+    }
+    s.bypass = true;
+    for (int b = 0; b < fadeBlocks; ++b) {
+        samples.fill(.22f);
+        dsp.process(samples.data(), nullptr, block, s);
+    }
+    for (int i = 0; i < block; ++i)
+        samples[i] = i % 2 == 0 ? 70.f : -70.f;
+    dsp.process(samples.data(), nullptr, block, s);
+    for (int i = 0; i < block; ++i)
+        require(samples[i] == (i % 2 == 0 ? 70.f : -70.f),
+                "Bypass should preserve hot float input exactly after the transition");
+
     samples.fill(std::numeric_limits<float>::quiet_NaN());
     dsp.process(samples.data(), nullptr, block, s);
     require(std::all_of(samples.begin(), samples.end(), [](float x) { return std::isfinite(x); }),
@@ -288,9 +370,11 @@ void testBypassAndSafety(double rate) {
 } // namespace
 
 int main() {
+    testCharacterFoldback();
     for (const auto rate : {44100., 48000., 96000.}) {
         testLowCutAndDynamics(rate);
         testFocusFrequencyAndOutput(rate);
+        testStereoDeess(rate);
         testBackgroundNoise(rate, .011f);
         testBackgroundNoise(rate, .026f);
         testSignalOrder(rate);

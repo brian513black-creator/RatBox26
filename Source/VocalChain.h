@@ -29,10 +29,13 @@ public:
         air = filter(8200);
         sibilance = cutoffCoefficient(5700);
         sibilance /= 1.f + sibilance;
+        colourPole = cutoffCoefficient(5500);
+        colourPole /= 1.f + colourPole;
         wetLow = filter(220);
         wetHigh = filter(6100);
         roomDamping = filter(2830);
         fast = time(.003f);
+        bypassStep = 1.f / (rate * .01f);
         noiseOpen = time(.00025f);
         release = time(.085f);
         compAttack = time(.012f);
@@ -60,7 +63,7 @@ public:
             for (auto& delay : room.diffuse) delay.clear();
             room.low = room.high = 0.f;
         }
-        levelPower = highPower = compPower = 0.f;
+        compPower = 0.f;
         floor = .0015f;
         noiseGain = compGain = duckGain = 1.f;
         deessGain = 0.f;
@@ -79,6 +82,7 @@ public:
         const float focusTarget = cutoffCoefficient(target.focusHz);
         const float focusGainTarget = std::pow(10.f, target.focusDb / 20.f) - 1.f;
         const float outTarget = std::pow(10.f, target.output / 20.f);
+        const float activeTarget = target.bypass ? 0.f : 1.f;
         if (!initialized) {
             lowCutG = cutoffTarget;
             focusG = focusTarget;
@@ -86,7 +90,7 @@ public:
             tone = target.character;
             wet = target.space;
             outGain = outTarget;
-            active = target.bypass ? 0.f : 1.f;
+            active = activeTarget;
             for (size_t channel = 0; channel < rooms.size(); ++channel)
                 for (size_t i = 0; i < rooms[channel].combs.size(); ++i)
                     rooms[channel].combs[i].feedback = feedback[channel][i];
@@ -98,30 +102,33 @@ public:
             follow(lowCutG, cutoffTarget, smooth);
             follow(focusG, focusTarget, smooth);
             follow(focusGain, focusGainTarget, smooth);
-            constexpr float focusDamping = 1.f / 1.15f;
+            // Match the bell's boost and cut curves by exchanging the pole and zero damping.
+            const float focusDamping = (1.f / 1.15f) / std::sqrt(1.f + focusGain);
             const float focusA1 = 1.f / (1.f + focusG * (focusG + focusDamping));
             constexpr float damping = 1.41421356f;
             const float a1 = 1.f / (1.f + lowCutG * (lowCutG + damping));
+            float levels[2], highLevels[2];
             for (size_t channel = 0; channel < 2; ++channel) {
                 auto& state = channels[channel];
-                const float v1 = a1 * (state.integrator1 + lowCutG * (dry[channel] - state.integrator2));
+                const float source = std::clamp(dry[channel], -64.f, 64.f);
+                const float v1 = a1 * (state.integrator1 + lowCutG * (source - state.integrator2));
                 const float v2 = state.integrator2 + lowCutG * v1;
                 state.integrator1 = 2.f * v1 - state.integrator1;
                 state.integrator2 = 2.f * v2 - state.integrator2;
-                clean[channel] = dry[channel] - damping * v1 - v2;
+                clean[channel] = source - damping * v1 - v2;
                 const float sibV = (clean[channel] - state.sib) * sibilance;
                 const float sibLow = state.sib + sibV;
                 state.sib = sibLow + sibV;
                 high[channel] = clean[channel] - sibLow;
+                envelope(state.levelPower, clean[channel] * clean[channel], fast, release);
+                envelope(state.highPower, high[channel] * high[channel], fast, release);
+                levels[channel] = std::sqrt(state.levelPower);
+                highLevels[channel] = std::sqrt(state.highPower);
             }
 
             const float input = std::max(std::abs(dry[0]), std::abs(dry[1]));
-            const float level = std::max(std::abs(clean[0]), std::abs(clean[1]));
-            const float hf = std::max(std::abs(high[0]), std::abs(high[1]));
-            envelope(levelPower, level * level, fast, release);
-            envelope(highPower, hf * hf, fast, release);
-            const float voiceLevel = std::sqrt(levelPower);
-            const float highLevel = std::sqrt(highPower);
+            const float voiceLevel = std::max(levels[0], levels[1]);
+            const float highLevel = std::max(highLevels[0], highLevels[1]);
 
             // Allow a higher floor for hiss while keeping low-frequency vocal
             // notes above the floor-learning threshold.
@@ -134,16 +141,21 @@ public:
             const float noiseTarget = 1.f - .95f * target.noise * (1.f - speech * speech * (3.f - 2.f * speech));
             follow(noiseGain, noiseTarget, noiseTarget > noiseGain ? noiseOpen : release);
 
-            const float sRatio = highLevel / std::max(voiceLevel, .008f);
-            const float sReduction = target.deess * .78f *
-                std::clamp((sRatio - .28f) * 2.6f, 0.f, 1.f) *
-                std::clamp((highLevel * noiseGain - .012f) * 65.f, 0.f, 1.f);
+            // Detect on each side and link the gain to the strongest sibilance.
+            float sibilant = 0.f;
+            for (size_t channel = 0; channel < 2; ++channel) {
+                const float ratio = highLevels[channel] / std::max(levels[channel], .008f);
+                const float strength = std::clamp((ratio - .28f) * 2.6f, 0.f, 1.f) *
+                    std::clamp((highLevels[channel] * noiseGain - .012f) * 65.f, 0.f, 1.f);
+                sibilant = std::max(sibilant, strength);
+            }
+            const float sReduction = target.deess * .78f * sibilant;
             follow(deessGain, sReduction, sReduction > deessGain ? fast : release);
 
             follow(tone, target.character, smooth);
             follow(wet, target.space, smooth);
             follow(outGain, outTarget, smooth);
-            follow(active, target.bypass ? 0.f : 1.f, fast);
+            active += std::clamp(activeTarget - active, -bypassStep, bypassStep);
 
             for (size_t channel = 0; channel < 2; ++channel) {
                 auto& state = channels[channel];
@@ -156,9 +168,13 @@ public:
                 const float upperMid = x - follow(state.presence, x, presence);
                 const float top = x - follow(state.air, x, air);
                 x += tone * (.23f * upperMid + .33f * top);
+                // Keep the air shelf full-band while limiting what drives the nonlinear stage.
+                const float bodyV = (x - state.colourLow) * colourPole;
+                const float body = state.colourLow + bodyV;
+                state.colourLow = body + bodyV;
                 const float drive = 1.f + .65f * tone;
-                const float colored = std::tanh(x * drive) / drive;
-                clean[channel] = x + .4f * tone * (colored - x);
+                const float colored = std::tanh(body * drive) / drive;
+                clean[channel] = x + .4f * tone * (colored - body);
             }
 
             const float shaped = std::max(std::abs(clean[0]), std::abs(clean[1]));
@@ -198,9 +214,9 @@ public:
             }
 
             const float stereoOrMono = right ? clean[0] : .5f * (clean[0] + clean[1]);
-            left[frame] = dry[0] + (stereoOrMono - dry[0]) * active;
+            left[frame] = dry[0] * (1.f - active) + stereoOrMono * active;
             if (right)
-                right[frame] = dry[1] + (clean[1] - dry[1]) * active;
+                right[frame] = dry[1] * (1.f - active) + clean[1] * active;
             meters.input = std::max(meters.input, input);
             meters.output = std::max(meters.output, std::max(std::abs(left[frame]),
                 right ? std::abs(right[frame]) : 0.f));
@@ -240,9 +256,10 @@ private:
     struct Channel {
         float focus1 = 0, focus2 = 0;
         float integrator1 = 0, integrator2 = 0, sib = 0, presence = 0, air = 0;
+        float colourLow = 0, levelPower = 0, highPower = 0;
     };
 
-    static float safe(float x) { return std::isfinite(x) ? std::clamp(x, -64.f, 64.f) : 0.f; }
+    static float safe(float x) { return std::isfinite(x) ? x : 0.f; }
     static float follow(float& state, float value, float coefficient) {
         state += coefficient * (value - state);
         return state;
@@ -259,9 +276,9 @@ private:
     float rate = 48000, lowCutG = 0, presence = 0, air = 0, sibilance = 0;
     bool initialized = false;
     float wetLow = 0, wetHigh = 0, roomDamping = 0, fast = 0, release = 0, smooth = 0;
-    float noiseOpen = 0;
+    float noiseOpen = 0, colourPole = 0, bypassStep = 0;
     float compAttack = 0, compRelease = 0, floorRise = 0, floorFall = 0, duckRelease = 0;
-    float levelPower = 0, highPower = 0, compPower = 0, floor = .0015f;
+    float compPower = 0, floor = .0015f;
     float noiseGain = 1, deessGain = 0, compGain = 1, duckGain = 1;
     float focusG = 0, focusGain = 0;
     float tone = 0, wet = 0, active = 1, outGain = 1;
