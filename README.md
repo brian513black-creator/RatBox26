@@ -6,16 +6,31 @@ RatBox26 is a vocal channel-strip VST3 for 64-bit Windows 11 DAWs. The editor gr
 
 | Stage | What it does |
 | --- | --- |
-| Low Cut | A 12 dB/octave high-pass filter. Start at 70 Hz and raise it toward 350 Hz as needed to reduce rumble or proximity buildup. |
+| Input Trim | Adjusts the signal before Low Cut and the rest of the chain from −18 to +18 dB, starting at 0 dB. The input meter follows the trimmed level. In global Bypass, it shows the original signal level. |
+| Low Cut | A 12 dB/octave high-pass filter from 70 to 350 Hz. Click the Low Cut checkbox to switch the filter off or on. It starts on so older sessions retain their sound. |
 | Background Noise | Adaptive downward expansion that estimates the noise floor and attenuates steady background during gaps and quiet passages. Adjust it while listening to the quiet ends of phrases. Background that overlaps a loud vocal can remain audible. |
 | De-ess | Dynamic high-frequency reduction for sharp consonants. |
 | Tonal Focus | A bell EQ with a 150–500 Hz center and −6 to +6 dB of gain. It starts flat at 280 Hz. Apply a small temporary boost and sweep the center to locate the tone, then set the final cut or boost. |
 | Character | Adds presence, air, and light saturation inspired by the Sony C‑800G sound. Results depend on the voice, recording, and microphone. |
 | Compression | Light peak control with a linked detector that follows the EQ and character stages. |
 | Reverb | Filtered stereo reverb with adjustable level, decay, and vocal-driven ducking. The detector uses the compressed vocal. The wet signal recedes during phrases and recovers in the gaps. The adaptation runs locally using DSP. |
-| Output | Final gain, with a red indication on peaks at or above 0 dBFS. Use Bypass for a dry comparison. |
+| Output | Final gain. The **CLIP** indicator stays lit after a sample reaches 0 dBFS. Click **CLIP** to clear it. Global Bypass passes the original dry audio. |
 
-## Build and install on Windows 11
+## Install on Windows 11 x64
+
+1. Sign in to GitHub and open a successful Windows VST3 workflow run. Under **Artifacts**, download `RatBox26-<version>-Windows-x64-VST3`. The ZIP contains the complete `RatBox26.vst3` bundle and this guide. [Windows VST3 workflow](https://github.com/brian513black-creator/RatBox26/actions/workflows/windows.yml)
+2. On a machine without the current x64 Microsoft Visual C++ Redistributable, install it before scanning the plugin. A build from source also requires the tools listed below. [Microsoft Visual C++ Redistributable downloads](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist)
+3. Close your DAW, extract the ZIP, and copy the entire extracted `RatBox26.vst3` folder to `C:\Program Files\Common Files\VST3`. If you are updating, replace the previous bundle in that location.
+4. Open the DAW, rescan VST3 plugins, and insert **RatBox26** on a vocal track.
+
+## Check the plugin on a recorded vocal
+
+1. Loop a phrase with quiet words, sibilants, and a pause. Check the input meter and adjust Input Trim if the chain is receiving too much or too little level. Then adjust Low Cut, Background Noise, and De-ess while listening for clear words and natural breaths.
+2. Switch **Bypass** on and off. Adjust **Output** with bypass off until the processed and dry phrase sound equally loud. Then compare intelligibility, tone, and compression at that matched level.
+3. Increase **Reverb Level** enough to hear its tail and listen to the pause. Adjust **Vocal Ducking** to hear the wet signal recede during the phrase and recover afterward.
+4. Save the session, reopen it, and confirm the controls and bypass setting return to the saved values. Bounce the phrase and check the tail and output level against playback.
+
+## Build from source on Windows 11
 
 Install Visual Studio 2022 with **Desktop development with C++**, CMake 3.22 or later, and Git. From the repository root in PowerShell:
 
@@ -25,7 +40,9 @@ cmake --build build --config Release --parallel 2
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-CMake fetches JUCE 8.0.6. Copy the entire `build/RatBox26_artefacts/Release/VST3/RatBox26.vst3` bundle to `C:\Program Files\Common Files\VST3`, then rescan plugins in the DAW. The Windows GitHub Actions workflow builds the x64 VST3, runs DSP tests, and loads the built plugin in a smoke-test host before uploading the bundle. The host checks mono, stereo, mono-to-stereo, dry passthrough while the plugin is inactive, and clearing audio after a processing restart.
+CMake fetches JUCE 8.0.6. The Release bundle is at `build/RatBox26_artefacts/Release/VST3/RatBox26.vst3`. Copy it to the same installation path as the downloaded bundle.
+
+Windows CI builds the x64 VST3, runs the DSP and host smoke tests, and uploads the versioned package. It then downloads the artifact, checks the bundle layout and version, and runs the smoke test against the packaged plugin. The host test covers the three channel layouts, inactive passthrough, clearing audio after restart, automation, state restore, and opening and resizing the editor.
 
 ## DSP checks without JUCE
 

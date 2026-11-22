@@ -90,6 +90,37 @@ void testLowCutAndDynamics(double rate) {
             "Compressor should reduce high levels");
 }
 
+void testLowCutSwitch(double rate) {
+    ratbox::VocalChain switched, reference;
+    switched.prepare(rate);
+    reference.prepare(rate);
+    const auto enabled = neutral();
+    auto settings = enabled;
+    std::array<float, block> input{}, output{}, filtered{};
+    const int phaseLength = static_cast<int>(.04 * rate);
+    for (int phase = 0; phase < 3; ++phase) {
+        settings.lowCutEnabled = phase == 1;
+        for (int start = 0; start < phaseLength; start += block) {
+            const int frames = std::min(block, phaseLength - start);
+            for (int i = 0; i < frames; ++i) {
+                const int position = phase * phaseLength + start + i;
+                input[i] = output[i] = filtered[i] = .25f * std::cos(6.283185307 * 70 * position / rate);
+            }
+            reference.process(filtered.data(), nullptr, frames, enabled);
+            switched.process(output.data(), nullptr, frames, settings);
+            for (int i = 0; i < frames; ++i) {
+                const float progress = std::min(1.f, static_cast<float>((start + i + 1) / (.01 * rate)));
+                const float mix = phase == 0 ? 0.f : phase == 1 ? progress : 1.f - progress;
+                const float expected = input[i] * (1.f - mix) + filtered[i] * mix;
+                require(std::abs(output[i] - expected) < .00001f,
+                        "Low Cut should crossfade against the warm filter output");
+                if (phase == 0 || (phase == 2 && start + i > .02 * rate))
+                    require(output[i] == input[i], "Low Cut off should leave a neutral chain exactly dry");
+            }
+        }
+    }
+}
+
 void testFocusFrequencyAndOutput(double rate) {
     const auto dry = neutral();
     auto boost = dry;
@@ -127,6 +158,62 @@ void testFocusFrequencyAndOutput(double rate) {
         const float ratio = sineRms(rate, 500, .2f, adjusted) / reference;
         require(std::abs(ratio - std::pow(10.f, db / 20.f)) < .001f,
                 "Output trim should apply the selected decibel gain");
+    }
+}
+
+void testInputTrim(double rate) {
+    auto settings = neutral();
+    settings.lowCutEnabled = false;
+    ratbox::VocalChain chain;
+    chain.prepare(rate);
+    constexpr float leftInput = .0625f, rightInput = -.125f;
+    std::array<float, block> left{}, right{};
+    for (const auto db : {-18.f, 18.f}) {
+        chain.reset();
+        settings.inputTrimDb = db;
+        settings.bypass = false;
+        left.fill(leftInput);
+        right.fill(rightInput);
+        const auto active = chain.process(left.data(), right.data(), block, settings);
+        const auto gain = std::pow(10.f, db / 20.f);
+        require(std::abs(left.front() - leftInput * gain) < 1.e-6f &&
+                std::abs(right.front() - rightInput * gain) < 1.e-6f &&
+                std::abs(active.input - std::abs(rightInput * gain)) < 1.e-6f,
+                "Restored input trim should apply the selected gain to both channels and the input meter");
+
+        chain.reset();
+        settings.bypass = true;
+        left.fill(leftInput);
+        right.fill(rightInput);
+        const auto bypassed = chain.process(left.data(), right.data(), block, settings);
+        require(left.front() == leftInput && right.front() == rightInput && bypassed.input == std::abs(rightInput),
+                "Global bypass should ignore input trim in its dry signal and input meter");
+    }
+
+    chain.reset();
+    settings.bypass = false;
+    settings.inputTrimDb = 0.f;
+    left.fill(leftInput);
+    chain.process(left.data(), nullptr, block, settings);
+    settings.inputTrimDb = 18.f;
+    left.fill(leftInput);
+    chain.process(left.data(), nullptr, block, settings);
+    require(left.front() > leftInput && left.front() < 1.01f * leftInput,
+            "Changing input trim should ramp instead of jumping on the first sample");
+
+    settings.comp = 1.f;
+    for (const auto db : {0.f, 18.f}) {
+        chain.reset();
+        settings.inputTrimDb = db;
+        ratbox::Meters meters;
+        const int blocks = static_cast<int>(.25 * rate / block);
+        for (int b = 0; b < blocks; ++b) {
+            for (int i = 0; i < block; ++i)
+                left[i] = leftInput * std::sin(6.283185307 * 440 * (b * block + i) / rate);
+            meters = chain.process(left.data(), nullptr, block, settings);
+        }
+        require(db == 0.f ? meters.comp == 0.f : meters.comp > .4f,
+                "Input trim should drive the compressor from upstream");
     }
 }
 
@@ -409,7 +496,9 @@ int main() {
     testCharacterFoldback();
     for (const auto rate : {44100., 48000., 96000.}) {
         testLowCutAndDynamics(rate);
+        testLowCutSwitch(rate);
         testFocusFrequencyAndOutput(rate);
+        testInputTrim(rate);
         testStereoDeess(rate);
         testBackgroundNoise(rate, .011f);
         testBackgroundNoise(rate, .026f);

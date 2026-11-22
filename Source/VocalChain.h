@@ -12,6 +12,8 @@ struct Settings {
     float space = .15f, decay = 1.65f, duck = .65f, output = 0.f;
     bool bypass = false;
     float lowCut = 70.f, focusHz = 280.f, focusDb = 0.f;
+    bool lowCutEnabled = true;
+    float inputTrimDb = 0.f;
 };
 
 struct Meters {
@@ -35,7 +37,7 @@ public:
         wetHigh = filter(6100);
         roomDamping = filter(2830);
         fast = time(.003f);
-        bypassStep = 1.f / (rate * .01f);
+        switchStep = 1.f / (rate * .01f);
         noiseOpen = time(.00025f);
         release = time(.085f);
         compAttack = time(.012f);
@@ -80,14 +82,18 @@ public:
         const float cutoffTarget = cutoffCoefficient(target.lowCut);
         const float focusTarget = cutoffCoefficient(target.focusHz);
         const float focusGainTarget = std::pow(10.f, target.focusDb / 20.f) - 1.f;
+        const float inputGainTarget = std::pow(10.f, target.inputTrimDb / 20.f);
         const float outTarget = std::pow(10.f, target.output / 20.f);
         const float activeTarget = target.bypass ? 0.f : 1.f;
+        const float lowCutMixTarget = target.lowCutEnabled ? 1.f : 0.f;
         if (!initialized) {
             lowCutG = cutoffTarget;
+            lowCutMix = lowCutMixTarget;
             focusG = focusTarget;
             focusGain = focusGainTarget;
             tone = target.character;
             wet = target.space;
+            inputGain = inputGainTarget;
             outGain = outTarget;
             active = activeTarget;
             for (size_t channel = 0; channel < rooms.size(); ++channel)
@@ -98,7 +104,9 @@ public:
         for (int frame = 0; frame < frames; ++frame) {
             float dry[2] = {safe(left[frame]), right ? safe(right[frame]) : safe(left[frame])};
             float clean[2], high[2];
+            follow(inputGain, inputGainTarget, smooth);
             follow(lowCutG, cutoffTarget, smooth);
+            lowCutMix += std::clamp(lowCutMixTarget - lowCutMix, -switchStep, switchStep);
             follow(focusG, focusTarget, smooth);
             follow(focusGain, focusGainTarget, smooth);
             // Match the bell's boost and cut curves by exchanging the pole and zero damping.
@@ -107,15 +115,18 @@ public:
             constexpr float damping = 1.41421356f;
             const float a1 = 1.f / (1.f + lowCutG * (lowCutG + damping));
             float levels[2], highLevels[2];
+            float input = 0.f;
             float speech = 0.f;
             for (size_t channel = 0; channel < 2; ++channel) {
                 auto& state = channels[channel];
-                const float source = std::clamp(dry[channel], -64.f, 64.f);
+                const float source = std::clamp(dry[channel] * inputGain, -64.f, 64.f);
+                input = std::max(input, std::abs(source));
                 const float v1 = a1 * (state.integrator1 + lowCutG * (source - state.integrator2));
                 const float v2 = state.integrator2 + lowCutG * v1;
                 state.integrator1 = 2.f * v1 - state.integrator1;
                 state.integrator2 = 2.f * v2 - state.integrator2;
-                clean[channel] = source - damping * v1 - v2;
+                const float filtered = source - damping * v1 - v2;
+                clean[channel] = source * (1.f - lowCutMix) + filtered * lowCutMix;
                 const float sibV = (clean[channel] - state.sib) * sibilance;
                 const float sibLow = state.sib + sibV;
                 state.sib = sibLow + sibV;
@@ -136,7 +147,6 @@ public:
                 speech = std::max(speech, std::clamp((snr - 1.25f) / 2.25f, 0.f, 1.f));
             }
 
-            const float input = std::max(std::abs(dry[0]), std::abs(dry[1]));
             // Either side can open the linked gain for both channels.
             const float noiseTarget = 1.f - .95f * target.noise * (1.f - speech * speech * (3.f - 2.f * speech));
             follow(noiseGain, noiseTarget, noiseTarget > noiseGain ? noiseOpen : release);
@@ -155,7 +165,7 @@ public:
             follow(tone, target.character, smooth);
             follow(wet, target.space, smooth);
             follow(outGain, outTarget, smooth);
-            active += std::clamp(activeTarget - active, -bypassStep, bypassStep);
+            active += std::clamp(activeTarget - active, -switchStep, switchStep);
 
             for (size_t channel = 0; channel < 2; ++channel) {
                 auto& state = channels[channel];
@@ -217,6 +227,8 @@ public:
             left[frame] = dry[0] * (1.f - active) + stereoOrMono * active;
             if (right)
                 right[frame] = dry[1] * (1.f - active) + clean[1] * active;
+            if (active <= 0.f)
+                input = std::max(std::abs(dry[0]), std::abs(dry[1]));
             meters.input = std::max(meters.input, input);
             meters.output = std::max(meters.output, std::max(std::abs(left[frame]),
                 right ? std::abs(right[frame]) : 0.f));
@@ -277,12 +289,12 @@ private:
     float rate = 48000, lowCutG = 0, presence = 0, air = 0, sibilance = 0;
     bool initialized = false;
     float wetLow = 0, wetHigh = 0, roomDamping = 0, fast = 0, release = 0, smooth = 0;
-    float noiseOpen = 0, colourPole = 0, bypassStep = 0;
+    float noiseOpen = 0, colourPole = 0, switchStep = 0;
     float compAttack = 0, compRelease = 0, floorRise = 0, floorFall = 0, duckRelease = 0;
     float compPower = 0;
     float noiseGain = 1, deessGain = 0, compGain = 1, duckGain = 1;
-    float focusG = 0, focusGain = 0;
-    float tone = 0, wet = 0, active = 1, outGain = 1;
+    float lowCutMix = 1, focusG = 0, focusGain = 0;
+    float tone = 0, wet = 0, active = 1, inputGain = 1, outGain = 1;
 };
 
 } // namespace ratbox

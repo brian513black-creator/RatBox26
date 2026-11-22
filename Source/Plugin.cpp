@@ -6,7 +6,9 @@
 namespace {
 
 using APVTS = juce::AudioProcessorValueTreeState;
-constexpr size_t knobCount = 11;
+constexpr size_t knobCount = 12;
+constexpr size_t lowCutIndex = 8, inputTrimIndex = 11;
+constexpr auto lowCutEnabledId = "lowCutEnabled";
 struct Control {
     const char* id;
     const char* label;
@@ -24,7 +26,8 @@ constexpr std::array<Control, knobCount> controls{{
     {"output", "Output", " dB", -18, 12, 0, .1f},
     {"lowCut", "Low Cut", " Hz", 70, 350, 70, 1},
     {"focusHz", "Focus Frequency", " Hz", 150, 500, 280, 1},
-    {"focusDb", "Focus Gain", " dB", -6, 6, 0, .1f}
+    {"focusDb", "Focus Gain", " dB", -6, 6, 0, .1f},
+    {"inputTrim", "Input Trim", " dB", -18, 18, 0, .1f}
 }};
 
 class NumericParameter final : public juce::AudioParameterFloat {
@@ -55,10 +58,13 @@ public:
 
 APVTS::ParameterLayout makeParameters() {
     APVTS::ParameterLayout layout;
-    for (const auto& c : controls)
-        layout.add(std::make_unique<NumericParameter>(c));
+    for (size_t i = 0; i < inputTrimIndex; ++i)
+        layout.add(std::make_unique<NumericParameter>(controls[i]));
     layout.add(std::make_unique<juce::AudioParameterBool>(
         juce::ParameterID{"bypass", 1}, "Bypass", false));
+    layout.add(std::make_unique<juce::AudioParameterBool>(
+        juce::ParameterID{lowCutEnabledId, 1}, "Low Cut Enabled", true));
+    layout.add(std::make_unique<NumericParameter>(controls[inputTrimIndex]));
     return layout;
 }
 
@@ -73,6 +79,7 @@ public:
         for (size_t i = 0; i < controls.size(); ++i)
             values[i] = parameters.getRawParameterValue(controls[i].id);
         bypass = parameters.getRawParameterValue("bypass");
+        lowCutEnabled = parameters.getRawParameterValue(lowCutEnabledId);
     }
 
     const juce::String getName() const override { return "RatBox26"; }
@@ -103,6 +110,8 @@ public:
     void clearMeters() {
         for (auto& meter : meters) meter.store(0, std::memory_order_relaxed);
     }
+    bool hasOutputClip() const { return outputClipped.load(std::memory_order_relaxed); }
+    void clearOutputClip() { outputClipped.store(false, std::memory_order_relaxed); }
     bool isBusesLayoutSupported(const BusesLayout& layout) const override {
         const auto output = layout.getMainOutputChannelSet();
         const auto input = layout.getMainInputChannelSet();
@@ -127,10 +136,13 @@ public:
         };
         const ratbox::Settings settings{ value(0) * .01f, value(1) * .01f, value(2) * .01f,
             value(3) * .01f, value(4) * .01f, value(5), value(6) * .01f, value(7),
-            bypass->load(std::memory_order_relaxed) > .5f, value(8), value(9), value(10) };
+            bypass->load(std::memory_order_relaxed) > .5f, value(lowCutIndex), value(9), value(10),
+            lowCutEnabled->load(std::memory_order_relaxed) > .5f, value(inputTrimIndex) };
         const auto result = dsp.process(buffer.getWritePointer(0),
             buffer.getNumChannels() > 1 ? buffer.getWritePointer(1) : nullptr,
             buffer.getNumSamples(), settings);
+        if (result.output >= 1.f)
+            outputClipped.store(true, std::memory_order_relaxed);
         const float readings[]{result.input, result.output, result.noise, result.comp};
         for (size_t i = 0; i < meters.size(); ++i) {
             auto previous = meters[i].load(std::memory_order_relaxed);
@@ -154,11 +166,13 @@ private:
     bool prepared = false;
     std::array<std::atomic<float>*, knobCount> values{};
     std::atomic<float>* bypass = nullptr;
+    std::atomic<float>* lowCutEnabled = nullptr;
+    std::atomic<bool> outputClipped{false};
 };
 
 const juce::Colour ink{0xffeef4f0}, muted{0xff9aaca6}, mint{0xff72f0c2};
 const juce::Colour amber{0xffffbf83}, card{0xff181f20}, line{0xff354443};
-const juce::Colour base{0xff111617};
+const juce::Colour base{0xff111617}, clipRed{0xffff857c};
 
 juce::Font font(float height, bool bold = false) {
     return juce::Font{juce::FontOptions{height, bold ? juce::Font::bold : juce::Font::plain}};
@@ -232,7 +246,7 @@ public:
             auto& knob = knobs[i];
             knob.setLookAndFeel(&look);
             knob.setName(c.label);
-            knob.setTitle(c.label);
+            knob.setTitle(i == lowCutIndex ? "Low Cut Frequency" : c.label);
             knob.setWantsKeyboardFocus(true);
             knob.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
             knob.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 84, 23);
@@ -250,6 +264,24 @@ public:
         bypass.setColour(juce::ToggleButton::textColourId, ink);
         bypass.setColour(juce::ToggleButton::tickColourId, mint);
         addAndMakeVisible(bypass);
+        lowCut.setName("Low Cut Enabled");
+        lowCut.setTitle("Low Cut Enabled");
+        lowCut.setColour(juce::ToggleButton::textColourId, ink);
+        lowCut.setColour(juce::ToggleButton::tickColourId, mint);
+        addAndMakeVisible(lowCut);
+        clipIndicator.setName("Clear Output Clip");
+        clipIndicator.setTitle("Clear Output Clip");
+        clipIndicator.setDescription("No output clips detected.");
+        clipIndicator.setColour(juce::TextButton::buttonColourId, base);
+        clipIndicator.setColour(juce::TextButton::buttonOnColourId, clipRed);
+        clipIndicator.setColour(juce::TextButton::textColourOffId, muted);
+        clipIndicator.setColour(juce::TextButton::textColourOnId, base);
+        clipIndicator.onClick = [this] {
+            processor.clearOutputClip();
+            updateClipIndicator();
+        };
+        addAndMakeVisible(clipIndicator);
+        updateClipIndicator();
         setResizable(true, true);
         setResizeLimits(760, 620, 1100, 940);
         setSize(840, 680);
@@ -263,8 +295,10 @@ public:
 
     void resized() override {
         bypass.setBounds(getWidth() - 112, 28, 86, 32);
+        lowCut.setBounds(controlCell(0, 1).withHeight(20).withSizeKeepingCentre(84, 20));
+        clipIndicator.setBounds(meterCell(1).withHeight(22).withSizeKeepingCentre(41, 18));
         for (int row = 0; row < 3; ++row)
-            for (int column = 0; column < columnCount(row); ++column) {
+            for (int column = 0; column < 4; ++column) {
                 const auto cell = controlCell(row, column);
                 knobs[controlIndex(row, column)].setBounds(cell.withTrimmedTop(21).reduced(8, 2));
             }
@@ -288,7 +322,7 @@ public:
             constexpr const char* sectionNames[]{"CLEANUP", "TONAL FOCUS & DYNAMICS", "SPACE & OUTPUT"};
             write(g, sectionNames[row], panel.reduced(18, 0).removeFromTop(30),
                   12.f, row == 2 ? amber : mint, true);
-            for (int col = 0; col < columnCount(row); ++col) {
+            for (int col = 0; col < 4; ++col) {
                 const auto i = controlIndex(row, col);
                 const auto cell = controlCell(row, col);
                 if (col > 0) {
@@ -296,25 +330,22 @@ public:
                     g.drawVerticalLine(cell.getX(), static_cast<float>(cell.getY() + 6),
                                        static_cast<float>(cell.getBottom() - 8));
                 }
-                write(g, controls[i].label, cell.withHeight(20), 14.f, ink, true,
-                      juce::Justification::centred);
+                if (i != lowCutIndex)
+                    write(g, controls[i].label, cell.withHeight(20), 14.f, ink, true,
+                          juce::Justification::centred);
             }
         }
 
-        auto metrics = getLocalBounds().reduced(24, 0).withY(getHeight() - 78).withHeight(60);
         g.setColour(card);
-        g.fillRoundedRectangle(metrics.toFloat(), 12.f);
-        metrics.reduce(14, 10);
-        const int width = metrics.getWidth() / 4;
+        g.fillRoundedRectangle(meterPanel().toFloat(), 12.f);
         const char* names[]{"INPUT", "OUTPUT", "NOISE REDUCTION", "COMP REDUCTION"};
         for (size_t i = 0; i < displayed.size(); ++i)
-            drawMeter(g, metrics.removeFromLeft(width).reduced(7, 0), names[i], displayed[i], i >= 2);
+            drawMeter(g, meterCell(static_cast<int>(i)), names[i], displayed[i], i >= 2);
     }
 
 private:
-    static int columnCount(int row) { return row == 0 ? 3 : 4; }
     static size_t controlIndex(int row, int column) {
-        constexpr size_t groups[][4]{{8, 0, 1, 0}, {9, 10, 2, 3}, {4, 5, 6, 7}};
+        constexpr size_t groups[][4]{{inputTrimIndex, lowCutIndex, 0, 1}, {9, 10, 2, 3}, {4, 5, 6, 7}};
         return groups[row][column];
     }
     juce::Rectangle<int> section(int row) const {
@@ -323,8 +354,16 @@ private:
     }
     juce::Rectangle<int> controlCell(int row, int column) const {
         auto band = section(row).reduced(12, 0).withTrimmedTop(32).withTrimmedBottom(7);
-        const int width = band.getWidth() / columnCount(row);
+        const int width = band.getWidth() / 4;
         return {band.getX() + column * width, band.getY(), width, band.getHeight()};
+    }
+    juce::Rectangle<int> meterPanel() const {
+        return getLocalBounds().reduced(24, 0).withY(getHeight() - 78).withHeight(60);
+    }
+    juce::Rectangle<int> meterCell(int index) const {
+        const auto band = meterPanel().reduced(14, 10);
+        const int width = band.getWidth() / 4;
+        return band.withX(band.getX() + index * width).withWidth(width).reduced(7, 0);
     }
     static void write(juce::Graphics& g, const juce::String& text, juce::Rectangle<int> area,
                       float size, juce::Colour colour, bool bold, int align = juce::Justification::centredLeft) {
@@ -343,7 +382,7 @@ private:
         g.setColour(line);
         g.fillRoundedRectangle(track, 3.f);
         const float fraction = reduction ? -db / 24.f : (db + 60.f) / 60.f;
-        g.setColour(reduction ? amber : (level >= 1.f ? juce::Colour{0xffff857c} : mint));
+        g.setColour(reduction ? amber : (level >= 1.f ? clipRed : mint));
         const float width = track.getWidth() * juce::jlimit(0.f, 1.f, fraction);
         if (width > 0.f) g.fillRoundedRectangle(track.withWidth(width), 3.f);
     }
@@ -351,7 +390,15 @@ private:
         for (size_t i = 0; i < displayed.size(); ++i)
             displayed[i] = std::max(displayed[i] * .86f,
                 processor.meters[i].exchange(0.f, std::memory_order_relaxed));
+        updateClipIndicator();
         repaint(0, getHeight() - 96, getWidth(), 96);
+    }
+    void updateClipIndicator() {
+        const auto clipped = processor.hasOutputClip();
+        if (clipIndicator.getToggleState() == clipped) return;
+        clipIndicator.setToggleState(clipped, juce::dontSendNotification);
+        clipIndicator.setDescription(clipped ? "Output reached 0 dBFS. Activate to clear."
+                                             : "No output clips detected.");
     }
 
     Processor& processor;
@@ -360,6 +407,9 @@ private:
     std::array<std::unique_ptr<APVTS::SliderAttachment>, knobCount> bindings;
     juce::ToggleButton bypass;
     APVTS::ButtonAttachment bypassBinding{processor.parameters, "bypass", bypass};
+    juce::ToggleButton lowCut{"Low Cut"};
+    APVTS::ButtonAttachment lowCutBinding{processor.parameters, lowCutEnabledId, lowCut};
+    juce::TextButton clipIndicator{"CLIP"};
     std::array<float, 4> displayed{};
 };
 

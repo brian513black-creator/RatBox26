@@ -16,8 +16,44 @@ jobs:
       - run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64
       - run: cmake --build build --config Release --parallel 2
       - run: ctest --test-dir build -C Release --output-on-failure
+      - name: Stage Windows bundle
+        id: package
+        shell: pwsh
+        run: |
+          $version = (Get-Content -LiteralPath build/ratbox-version.txt -Raw).Trim()
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Unexpected plugin version: $version" }
+          $name = "RatBox26-$version-Windows-x64-VST3"
+          $stage = Join-Path $env:RUNNER_TEMP $name
+          New-Item -ItemType Directory -Path $stage | Out-Null
+          Copy-Item -LiteralPath build/RatBox26_artefacts/Release/VST3/RatBox26.vst3 -Destination $stage -Recurse
+          Copy-Item -LiteralPath README.md -Destination $stage
+          "name=$name" >> $env:GITHUB_OUTPUT
+          "path=$stage" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
       - uses: actions/upload-artifact@v4
         with:
-          name: RatBox26-Windows-x64-VST3
-          path: build/RatBox26_artefacts/Release/VST3/
+          name: ${{ steps.package.outputs.name }}
+          path: ${{ steps.package.outputs.path }}
           if-no-files-found: error
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: ${{ runner.temp }}/ratbox26-verified
+      - name: Verify downloaded bundle
+        shell: pwsh
+        env:
+          RATBOX_VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          $package = Join-Path $env:RUNNER_TEMP 'ratbox26-verified'
+          $bundle = Join-Path $package 'RatBox26.vst3'
+          $binary = Join-Path $bundle 'Contents/x86_64-win/RatBox26.vst3'
+          $manifest = Join-Path $bundle 'Contents/Resources/moduleinfo.json'
+          foreach ($file in @((Join-Path $package 'README.md'), $binary, $manifest)) {
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Missing package file: $file" }
+          }
+          $versionPattern = '"Version"\s*:\s*"' + [regex]::Escape($env:RATBOX_VERSION) + '"'
+          if ((Get-Content -LiteralPath $manifest -Raw) -notmatch $versionPattern) {
+            throw "Bundle manifest does not declare version $env:RATBOX_VERSION"
+          }
+          & "./build/Release/ratbox_vst3_smoke.exe" $binary
+          if ($LASTEXITCODE -ne 0) { throw 'Downloaded VST3 failed to load or process audio' }

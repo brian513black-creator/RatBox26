@@ -1,4 +1,5 @@
 #include "pluginterfaces/base/ibstream.h"
+#include "pluginterfaces/gui/iplugview.h"
 #include "pluginterfaces/vst/ivstaudioprocessor.h"
 #include "pluginterfaces/vst/ivsteditcontroller.h"
 #include "pluginterfaces/vst/ivstmessage.h"
@@ -129,7 +130,7 @@ public:
     ParamValue value{};
 };
 
-constexpr int parameterCount = 12;
+constexpr int parameterCount = 14;
 
 class ParameterChanges final : public TestHostObject<IParameterChanges, INLINE_UID_OF(IParameterChanges)> {
 public:
@@ -194,7 +195,7 @@ struct NumericParameter {
     double minimum, maximum, initial;
 };
 
-constexpr std::array<NumericParameter, parameterCount - 1> numericParameters{{
+constexpr std::array<NumericParameter, parameterCount - 2> numericParameters{{
     {"Background Noise", "%", 0., 100., 45.},
     {"De-ess", "%", 0., 100., 30.},
     {"Character", "%", 0., 100., 32.},
@@ -205,7 +206,8 @@ constexpr std::array<NumericParameter, parameterCount - 1> numericParameters{{
     {"Output", "dB", -18., 12., 0.},
     {"Low Cut", "Hz", 70., 350., 70.},
     {"Focus Frequency", "Hz", 150., 500., 280.},
-    {"Focus Gain", "dB", -6., 6., 0.}
+    {"Focus Gain", "dB", -6., 6., 0.},
+    {"Input Trim", "dB", -18., 18., 0.}
 }};
 
 void testNumericParameter(IEditController& controller, const ParameterInfo& info) {
@@ -245,7 +247,7 @@ void testHostParameters(IPluginFactory& factory) {
     check(source.controller->getParameterCount() == parameterCount, "all parameters exposed to host");
 
     ParameterChanges automation;
-    int bypassCount = 0;
+    int bypassCount = 0, lowCutSwitchCount = 0;
     for (int i = 0; i < parameterCount; ++i) {
         ParameterInfo info{};
         check(source.controller->getParameterInfo(i, info) == kResultOk, "get parameter info");
@@ -256,6 +258,9 @@ void testHostParameters(IPluginFactory& factory) {
         if ((info.flags & ParameterInfo::kIsBypass) != 0) {
             ++bypassCount;
             check(info.stepCount == 1 && info.defaultNormalizedValue == 0., "bypass is a default-off toggle");
+        } else if (parameterText(info.title) == "Low Cut Enabled") {
+            ++lowCutSwitchCount;
+            check(info.stepCount == 1 && info.defaultNormalizedValue == 1., "low cut is a default-on toggle");
         } else {
             testNumericParameter(*source.controller, info);
         }
@@ -269,6 +274,7 @@ void testHostParameters(IPluginFactory& factory) {
               "fresh instance starts at default values");
     }
     check(bypassCount == 1, "exactly one host bypass");
+    check(lowCutSwitchCount == 1, "exactly one Low Cut Enabled parameter");
 
     IAudioProcessor* processor = nullptr;
     check(source.component->queryInterface(INLINE_UID_OF(IAudioProcessor),
@@ -287,6 +293,31 @@ void testHostParameters(IPluginFactory& factory) {
     for (const auto& queue : automation.queues)
         check(restored.controller->getParamNormalized(queue.id) == queue.value,
               "host-automated value restored");
+}
+
+void testHostEditor(IPluginFactory& factory) {
+    ComponentAndController host(factory);
+    auto* view = host.controller->createView(ViewType::kEditor);
+    check(view != nullptr, "VST3 host creates editor");
+#ifdef _WIN32
+    check(view->isPlatformTypeSupported(kPlatformTypeHWND) == kResultOk,
+          "VST3 editor supports HWND embedding");
+#else
+    check(view->isPlatformTypeSupported(kPlatformTypeX11EmbedWindowID) == kResultOk,
+          "VST3 editor supports X11 embedding");
+#endif
+    check(view->canResize() == kResultOk, "VST3 editor exposes resize");
+    ViewRect limits{0, 0, 100, 100};
+    check(view->checkSizeConstraint(&limits) == kResultOk, "VST3 editor reports minimum size");
+    ViewRect requested{0, 0, limits.getWidth() + 20, limits.getHeight() + 20};
+    ViewRect actual{};
+    check(view->onSize(&requested) == kResultOk && view->getSize(&actual) == kResultOk &&
+          actual.getWidth() == requested.getWidth() && actual.getHeight() == requested.getHeight(),
+          "VST3 editor applies host resize");
+    view->release();
+    view = host.controller->createView(ViewType::kEditor);
+    check(view != nullptr, "VST3 editor reopens");
+    view->release();
 }
 
 } // namespace
@@ -396,6 +427,7 @@ int main(int argc, char** argv) {
         component->release();
     }
     testHostParameters(*factory);
+    testHostEditor(*factory);
     factory->release();
     check(exitFn(), "module exit");
 #ifdef _WIN32
@@ -403,5 +435,5 @@ int main(int argc, char** argv) {
 #else
     dlclose(library);
 #endif
-    std::cout << "VST3 audio processing, automation, and component-state round trip passed\n";
+    std::cout << "VST3 audio, automation, state restore, and editor lifecycle passed\n";
 }
