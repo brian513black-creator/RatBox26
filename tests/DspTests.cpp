@@ -183,6 +183,42 @@ void testBackgroundNoise(double rate, float peak) {
     require(wetEnergy < .08 * dryEnergy, "Noise floor tracking should attenuate steady broadband noise");
 }
 
+void testStereoNoiseLink(double rate) {
+    ratbox::VocalChain tested, reference;
+    tested.prepare(rate);
+    reference.prepare(rate);
+    const auto dry = neutral();
+    auto reduced = dry;
+    reduced.noise = 1.f;
+    std::array<float, block> left{}, right{}, dryLeft{}, dryRight{};
+    std::uint32_t random = 784217;
+    double energy = 0., dryEnergy = 0., reducedHiss = 0., dryHiss = 0.;
+    const int blocks = static_cast<int>(7 * rate / block);
+    for (int b = 0; b < blocks; ++b) {
+        for (int i = 0; i < block; ++i) {
+            const int sample = b * block + i;
+            const double phase = 6.283185307 * 440. * sample / rate;
+            left[i] = dryLeft[i] = sample < 3 * rate ? 0.f : .026f * std::sin(phase);
+            random = 1664525u * random + 1013904223u;
+            right[i] = dryRight[i] = .034f * (static_cast<float>(random >> 16) / 32768.f - 1.f);
+        }
+        tested.process(left.data(), right.data(), block, reduced);
+        reference.process(dryLeft.data(), dryRight.data(), block, dry);
+        if (b * block >= 2.8 * rate && (b + 1) * block <= 3 * rate)
+            for (int i = 0; i < block; ++i) {
+                reducedHiss += right[i] * right[i];
+                dryHiss += dryRight[i] * dryRight[i];
+            }
+        if (b >= blocks - 20)
+            for (int i = 0; i < block; ++i) {
+                energy += left[i] * left[i];
+                dryEnergy += dryLeft[i] * dryLeft[i];
+            }
+    }
+    require(reducedHiss < .08 * dryHiss, "Noise reduction should still learn hiss during a stereo pause");
+    require(energy > .98 * dryEnergy, "Hiss on one channel should not suppress a clean note on the other");
+}
+
 void testSignalOrder(double rate) {
     ratbox::VocalChain clean, reference;
     clean.prepare(rate);
@@ -377,6 +413,7 @@ int main() {
         testStereoDeess(rate);
         testBackgroundNoise(rate, .011f);
         testBackgroundNoise(rate, .026f);
+        testStereoNoiseLink(rate);
         testSignalOrder(rate);
         testNoiseOnset(rate);
         testReverb(rate);

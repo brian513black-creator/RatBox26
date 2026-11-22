@@ -64,7 +64,6 @@ public:
             room.low = room.high = 0.f;
         }
         compPower = 0.f;
-        floor = .0015f;
         noiseGain = compGain = duckGain = 1.f;
         deessGain = 0.f;
         initialized = false;
@@ -108,6 +107,7 @@ public:
             constexpr float damping = 1.41421356f;
             const float a1 = 1.f / (1.f + lowCutG * (lowCutG + damping));
             float levels[2], highLevels[2];
+            float speech = 0.f;
             for (size_t channel = 0; channel < 2; ++channel) {
                 auto& state = channels[channel];
                 const float source = std::clamp(dry[channel], -64.f, 64.f);
@@ -124,20 +124,20 @@ public:
                 envelope(state.highPower, high[channel] * high[channel], fast, release);
                 levels[channel] = std::sqrt(state.levelPower);
                 highLevels[channel] = std::sqrt(state.highPower);
+
+                // Learn each side separately so noise on one side cannot hide a voice on the other.
+                const float level = levels[channel];
+                const float candidate = std::clamp(level, .0002f, .035f);
+                const float learningThreshold = highLevels[channel] > .55f * level ? .030f : .016f;
+                auto& floor = state.noiseFloor;
+                if (candidate < floor || level < std::max(learningThreshold, floor * 2.4f))
+                    follow(floor, candidate, candidate < floor ? floorFall : floorRise);
+                const float snr = level / std::max(floor, .0015f);
+                speech = std::max(speech, std::clamp((snr - 1.25f) / 2.25f, 0.f, 1.f));
             }
 
             const float input = std::max(std::abs(dry[0]), std::abs(dry[1]));
-            const float voiceLevel = std::max(levels[0], levels[1]);
-            const float highLevel = std::max(highLevels[0], highLevels[1]);
-
-            // Allow a higher floor for hiss while keeping low-frequency vocal
-            // notes above the floor-learning threshold.
-            const float candidate = std::clamp(voiceLevel, .0002f, .035f);
-            const float learningThreshold = highLevel > .55f * voiceLevel ? .030f : .016f;
-            if (candidate < floor || voiceLevel < std::max(learningThreshold, floor * 2.4f))
-                follow(floor, candidate, candidate < floor ? floorFall : floorRise);
-            const float snr = voiceLevel / std::max(floor, .0015f);
-            const float speech = std::clamp((snr - 1.25f) / 2.25f, 0.f, 1.f);
+            // Either side can open the linked gain for both channels.
             const float noiseTarget = 1.f - .95f * target.noise * (1.f - speech * speech * (3.f - 2.f * speech));
             follow(noiseGain, noiseTarget, noiseTarget > noiseGain ? noiseOpen : release);
 
@@ -257,6 +257,7 @@ private:
         float focus1 = 0, focus2 = 0;
         float integrator1 = 0, integrator2 = 0, sib = 0, presence = 0, air = 0;
         float colourLow = 0, levelPower = 0, highPower = 0;
+        float noiseFloor = .0015f;
     };
 
     static float safe(float x) { return std::isfinite(x) ? x : 0.f; }
@@ -278,7 +279,7 @@ private:
     float wetLow = 0, wetHigh = 0, roomDamping = 0, fast = 0, release = 0, smooth = 0;
     float noiseOpen = 0, colourPole = 0, bypassStep = 0;
     float compAttack = 0, compRelease = 0, floorRise = 0, floorFall = 0, duckRelease = 0;
-    float compPower = 0, floor = .0015f;
+    float compPower = 0;
     float noiseGain = 1, deessGain = 0, compGain = 1, duckGain = 1;
     float focusG = 0, focusGain = 0;
     float tone = 0, wet = 0, active = 1, outGain = 1;
