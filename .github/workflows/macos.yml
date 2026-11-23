@@ -60,6 +60,7 @@ jobs:
           cat > "$tools/verify.sh" <<'EOF'
           #!/usr/bin/env bash
           set -euo pipefail
+          trap 'echo "::error title=macOS package validation::Line $LINENO failed: $BASH_COMMAND" >&2' ERR
           archive=$1
           architecture=$2
           version=$3
@@ -72,16 +73,20 @@ jobs:
             location="$package/$bundle"
             executable="$location/Contents/MacOS/RatBox26"
             test -x "$executable"
-            lipo -verify_arch arm64 x86_64 "$executable"
+            lipo "$executable" -verify_arch arm64 x86_64
             codesign --verify --strict --verbose=2 "$location"
             bundle_version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$location/Contents/Info.plist")
             test "$bundle_version" = "$version"
           done
           grep -Fx "  \"Version\": \"$version\"," \
             "$package/RatBox26.vst3/Contents/Resources/moduleinfo.json"
-          lipo -verify_arch arm64 x86_64 "$tools/ratbox_dsp_tests"
-          lipo -verify_arch arm64 x86_64 "$tools/ratbox_vst3_smoke"
-          ctest --test-dir "$tools" --output-on-failure
+          lipo "$tools/ratbox_dsp_tests" -verify_arch arm64 x86_64
+          lipo "$tools/ratbox_vst3_smoke" -verify_arch arm64 x86_64
+          if ! ctest --test-dir "$tools" --output-on-failure; then
+            detail=$(grep -m1 -E 'VST3 smoke failed at|should |must ' "$tools/Testing/Temporary/LastTest.log" || true)
+            echo "::error title=macOS smoke test::${detail:-CTest failed. See the validation step output.}"
+            exit 1
+          fi
 
           components="$HOME/Library/Audio/Plug-Ins/Components"
           mkdir -p "$components"
