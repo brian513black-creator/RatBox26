@@ -18,6 +18,8 @@
 #ifdef _WIN32
  #define NOMINMAX
  #include <windows.h>
+#elif defined(__APPLE__)
+ #include <CoreFoundation/CoreFoundation.h>
 #else
  #include <dlfcn.h>
 #endif
@@ -302,6 +304,9 @@ void testHostEditor(IPluginFactory& factory) {
 #ifdef _WIN32
     check(view->isPlatformTypeSupported(kPlatformTypeHWND) == kResultOk,
           "VST3 editor supports HWND embedding");
+#elif defined(__APPLE__)
+    check(view->isPlatformTypeSupported(kPlatformTypeNSView) == kResultOk,
+          "VST3 editor supports NSView embedding");
 #else
     check(view->isPlatformTypeSupported(kPlatformTypeX11EmbedWindowID) == kResultOk,
           "VST3 editor supports X11 embedding");
@@ -311,8 +316,16 @@ void testHostEditor(IPluginFactory& factory) {
     check(view->checkSizeConstraint(&limits) == kResultOk, "VST3 editor reports minimum size");
     ViewRect requested{0, 0, limits.getWidth() + 20, limits.getHeight() + 20};
     ViewRect actual{};
-    check(view->onSize(&requested) == kResultOk && view->getSize(&actual) == kResultOk &&
-          actual.getWidth() == requested.getWidth() && actual.getHeight() == requested.getHeight(),
+    check(view->onSize(&requested) == kResultOk && view->getSize(&actual) == kResultOk,
+          "VST3 editor accepts host resize");
+#ifdef __APPLE__
+    // NSView sizes use logical points. Allow rounding on conversion back to host bounds.
+    constexpr int tolerance = 1;
+#else
+    constexpr int tolerance = 0;
+#endif
+    check(std::abs(actual.getWidth() - requested.getWidth()) <= tolerance &&
+          std::abs(actual.getHeight() - requested.getHeight()) <= tolerance,
           "VST3 editor applies host resize");
     view->release();
     view = host.controller->createView(ViewType::kEditor);
@@ -331,6 +344,31 @@ int main(int argc, char** argv) {
     const auto entry = reinterpret_cast<bool (*)()>(symbol("InitDll"));
     const auto exitFn = reinterpret_cast<bool (*)()>(symbol("ExitDll"));
     check(entry && exitFn && entry(), "module entry");
+#elif defined(__APPLE__)
+    const auto path = std::filesystem::absolute(argv[1]).native();
+    const auto url = CFURLCreateFromFileSystemRepresentation(kCFAllocatorDefault,
+        reinterpret_cast<const UInt8*>(path.data()), static_cast<CFIndex>(path.size()), true);
+    check(url != nullptr, "create VST3 bundle URL");
+    const auto library = CFBundleCreate(kCFAllocatorDefault, url);
+    CFRelease(url);
+    check(library != nullptr, "create VST3 bundle");
+    CFErrorRef loadError = nullptr;
+    const auto loaded = CFBundleLoadExecutableAndReturnError(library, &loadError);
+    if (loadError != nullptr) {
+        CFShow(loadError);
+        CFRelease(loadError);
+    }
+    check(loaded, "load VST3 bundle");
+    const auto symbol = [library](const char* name) {
+        const auto symbolName = CFStringCreateWithCString(kCFAllocatorDefault, name, kCFStringEncodingASCII);
+        check(symbolName != nullptr, "create VST3 symbol name");
+        const auto address = CFBundleGetFunctionPointerForName(library, symbolName);
+        CFRelease(symbolName);
+        return address;
+    };
+    const auto entry = reinterpret_cast<bool (*)(CFBundleRef)>(symbol("bundleEntry"));
+    const auto exitFn = reinterpret_cast<bool (*)()>(symbol("bundleExit"));
+    check(entry && exitFn && entry(library), "module entry");
 #else
     void* library = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
     if (library == nullptr) std::cerr << dlerror() << '\n';
@@ -432,6 +470,9 @@ int main(int argc, char** argv) {
     check(exitFn(), "module exit");
 #ifdef _WIN32
     FreeLibrary(library);
+#elif defined(__APPLE__)
+    // Match the Steinberg host: release the bundle after bundleExit, with no forced unload.
+    CFRelease(library);
 #else
     dlclose(library);
 #endif

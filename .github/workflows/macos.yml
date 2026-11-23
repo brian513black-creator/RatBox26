@@ -1,0 +1,145 @@
+name: macOS Universal VST3 and AU
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build universal package and validate on Apple silicon
+    runs-on: macos-15
+    timeout-minutes: 35
+    outputs:
+      version: ${{ steps.package.outputs.version }}
+      package: ${{ steps.package.outputs.name }}
+      validation-artifact: ${{ steps.package.outputs.validation-artifact }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure universal Release build
+        run: |
+          test "$(uname -m)" = arm64
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 \
+            '-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64'
+      - run: cmake --build build --parallel 2
+      - name: Package full bundles and validation tools
+        id: package
+        run: |
+          version=$(<build/ratbox-version.txt)
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          name="RatBox26-$version-macOS-Universal-VST3-AU"
+          validation_artifact="ratbox-macos-validation-$GITHUB_RUN_ATTEMPT"
+          root="$RUNNER_TEMP/ratbox-macos"
+          stage="$root/stage"
+          tools="$root/validation"
+          transport="$root/transport"
+          mkdir -p "$stage" "$tools" "$transport"
+          ditto build/RatBox26_artefacts/Release/VST3/RatBox26.vst3 "$stage/RatBox26.vst3"
+          ditto build/RatBox26_artefacts/Release/AU/RatBox26.component "$stage/RatBox26.component"
+          cp README.md "$stage/"
+          for bundle in RatBox26.vst3 RatBox26.component; do
+            # Sign the staged bundle after all resources, including the VST3 manifest, exist.
+            codesign --force --sign - --timestamp=none "$stage/$bundle"
+            codesign --verify --strict --verbose=2 "$stage/$bundle"
+          done
+          ditto -c -k --sequesterRsrc "$stage" "$transport/$name.zip"
+
+          cp build/ratbox_dsp_tests build/ratbox_vst3_smoke "$tools/"
+          cat > "$tools/CTestTestfile.cmake" <<'EOF'
+          add_test(ratbox_dsp_tests "./ratbox_dsp_tests")
+          add_test(ratbox_vst3_smoke "./ratbox_vst3_smoke" "./package/RatBox26.vst3")
+          EOF
+          cat > "$tools/verify.sh" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          archive=$1
+          architecture=$2
+          version=$3
+          test "$(uname -m)" = "$architecture"
+          tools=$(cd "$(dirname "$0")" && pwd)
+          package="$tools/package"
+          ditto -x -k "$archive" "$package"
+          test -s "$package/README.md"
+          for bundle in RatBox26.vst3 RatBox26.component; do
+            location="$package/$bundle"
+            executable="$location/Contents/MacOS/RatBox26"
+            test -x "$executable"
+            lipo -verify_arch arm64 x86_64 "$executable"
+            codesign --verify --strict --verbose=2 "$location"
+            bundle_version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$location/Contents/Info.plist")
+            test "$bundle_version" = "$version"
+          done
+          grep -Fx "  \"Version\": \"$version\"," \
+            "$package/RatBox26.vst3/Contents/Resources/moduleinfo.json"
+          lipo -verify_arch arm64 x86_64 "$tools/ratbox_dsp_tests"
+          lipo -verify_arch arm64 x86_64 "$tools/ratbox_vst3_smoke"
+          ctest --test-dir "$tools" --output-on-failure
+
+          components="$HOME/Library/Audio/Plug-Ins/Components"
+          mkdir -p "$components"
+          test ! -e "$components/RatBox26.component"
+          ditto "$package/RatBox26.component" "$components/RatBox26.component"
+          killall AudioComponentRegistrar 2>/dev/null || true
+          component='aufx[[:space:]]+Rb26[[:space:]]+RtbA'
+          for attempt in 1 2 3 4 5; do
+            if auval -a > "$tools/au-components.log" && grep -Eq "$component" "$tools/au-components.log"; then
+              break
+            fi
+            sleep 2
+          done
+          grep -E "$component" "$tools/au-components.log"
+          auval -v aufx Rb26 RtbA | tee "$tools/auval.log"
+          grep -F 'AU VALIDATION SUCCEEDED' "$tools/auval.log"
+          EOF
+          tar -czf "$transport/ratbox-validation.tar.gz" -C "$root" validation
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "validation-artifact=$validation_artifact" >> "$GITHUB_OUTPUT"
+      - name: Validate the packaged VST3 and AU on arm64
+        env:
+          RATBOX_PACKAGE: ${{ steps.package.outputs.name }}
+          RATBOX_VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          root="$RUNNER_TEMP/ratbox-macos"
+          bash "$root/validation/verify.sh" "$root/transport/$RATBOX_PACKAGE.zip" arm64 "$RATBOX_VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.validation-artifact }}
+          path: ${{ runner.temp }}/ratbox-macos/transport/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  validate-intel:
+    name: Validate the same universal package on Intel and upload it
+    runs-on: macos-15-intel
+    needs: build
+    timeout-minutes: 15
+    env:
+      RATBOX_PACKAGE: ${{ needs.build.outputs.package }}
+      RATBOX_VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.validation-artifact }}
+          path: ${{ runner.temp }}/ratbox-macos/transport/
+      - name: Validate the packaged VST3 and AU on x86_64
+        run: |
+          root="$RUNNER_TEMP/ratbox-macos"
+          tar -xzf "$root/transport/ratbox-validation.tar.gz" -C "$root"
+          bash "$root/validation/verify.sh" "$root/transport/$RATBOX_PACKAGE.zip" x86_64 "$RATBOX_VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.package }}
+          path: ${{ runner.temp }}/ratbox-macos/transport/${{ needs.build.outputs.package }}.zip
+          if-no-files-found: error
+          compression-level: 0
