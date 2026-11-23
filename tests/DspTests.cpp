@@ -306,6 +306,48 @@ void testStereoNoiseLink(double rate) {
     require(energy > .98 * dryEnergy, "Hiss on one channel should not suppress a clean note on the other");
 }
 
+void testNoiseLearningAfterHum(double rate) {
+    ratbox::VocalChain tested, reference;
+    tested.prepare(rate);
+    reference.prepare(rate);
+    const auto dry = neutral();
+    auto reduced = dry;
+    reduced.noise = 1.f;
+    std::array<float, block> wet{}, flat{};
+    double humEnergy = 0., dryHumEnergy = 0.;
+    double earlyEnergy = 0., dryEarlyEnergy = 0.;
+    double lateEnergy = 0., dryLateEnergy = 0.;
+    const int sectionBlocks = static_cast<int>(6 * rate / block);
+    const int windowBlocks = static_cast<int>(.15 * rate / block);
+    const int earlyStart = sectionBlocks + windowBlocks;
+    const int lateStart = 2 * sectionBlocks - windowBlocks;
+    for (int b = 0; b < 2 * sectionBlocks; ++b) {
+        const bool hum = b < sectionBlocks;
+        const auto peak = hum ? .012f : .026f;
+        const auto frequency = hum ? 250. : 440.;
+        for (int i = 0; i < block; ++i)
+            wet[i] = flat[i] = peak * std::sin(6.283185307 * frequency * (b * block + i) / rate);
+        tested.process(wet.data(), nullptr, block, reduced);
+        reference.process(flat.data(), nullptr, block, dry);
+        for (int i = 0; i < block; ++i) {
+            if (hum && b >= sectionBlocks - windowBlocks) {
+                humEnergy += wet[i] * wet[i];
+                dryHumEnergy += flat[i] * flat[i];
+            } else if (b >= earlyStart && b < earlyStart + windowBlocks) {
+                earlyEnergy += wet[i] * wet[i];
+                dryEarlyEnergy += flat[i] * flat[i];
+            } else if (b >= lateStart) {
+                lateEnergy += wet[i] * wet[i];
+                dryLateEnergy += flat[i] * flat[i];
+            }
+        }
+    }
+    require(humEnergy < .08 * dryHumEnergy, "Noise reduction should still learn low-frequency hum");
+    require(lateEnergy > .10 * dryLateEnergy &&
+            lateEnergy / dryLateEnergy > .90 * earlyEnergy / dryEarlyEnergy,
+            "A stronger sustained note should not fade as the noise floor adapts");
+}
+
 void testSignalOrder(double rate) {
     ratbox::VocalChain clean, reference;
     clean.prepare(rate);
@@ -524,6 +566,7 @@ int main() {
         testBackgroundNoise(rate, .011f);
         testBackgroundNoise(rate, .026f);
         testStereoNoiseLink(rate);
+        testNoiseLearningAfterHum(rate);
         testSignalOrder(rate);
         testNoiseOnset(rate);
         testReverb(rate);

@@ -160,9 +160,11 @@ public:
                 // Learn each side separately so noise on one side cannot hide a voice on the other.
                 const float level = levels[channel];
                 const float candidate = std::clamp(level, .0002f, .035f);
-                const float learningThreshold = highLevels[channel] > .55f * level ? .030f : .016f;
                 auto& floor = state.noiseFloor;
-                if (candidate < floor || level < std::max(learningThreshold, floor * 2.4f))
+                // Only expand the learning range for hiss so a learned floor cannot absorb a quiet note.
+                const float learningThreshold = highLevels[channel] > .55f * level
+                    ? std::max(.030f, floor * 2.4f) : .016f;
+                if (candidate < floor || level < learningThreshold)
                     follow(floor, candidate, candidate < floor ? floorFall : floorRise);
                 const float snr = level / std::max(floor, .0015f);
                 speech = std::max(speech, std::clamp((snr - 1.25f) / 2.25f, 0.f, 1.f));

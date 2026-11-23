@@ -230,6 +230,14 @@ class Knob final : public juce::Slider {
             showTextBox();
             return true;
         }
+        if (key.isKeyCode(juce::KeyPress::tabKey) && hasKeyboardFocus(true) && !hasKeyboardFocus(false)) {
+            // Start traversal from the knob so Shift-Tab skips its own text field.
+            const BailOutChecker alive(this);
+            hideTextBox(false);
+            if (!alive.shouldBailOut())
+                moveKeyboardFocusToSibling(!key.getModifiers().isShiftDown());
+            return true;
+        }
         return juce::Slider::keyPressed(key);
     }
     void focusGained(FocusChangeType) override { repaint(); }
@@ -261,6 +269,10 @@ public:
         bypass.setButtonText("Bypass");
         bypass.setName("Bypass");
         bypass.setTitle("Bypass");
+        bypass.setExplicitFocusOrder(1);
+        knobs[inputTrimIndex].setExplicitFocusOrder(2);
+        lowCut.setExplicitFocusOrder(3);
+        knobs[lowCutIndex].setExplicitFocusOrder(4);
         bypass.setColour(juce::ToggleButton::textColourId, ink);
         bypass.setColour(juce::ToggleButton::tickColourId, mint);
         addAndMakeVisible(bypass);
