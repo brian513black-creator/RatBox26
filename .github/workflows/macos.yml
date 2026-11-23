@@ -88,21 +88,24 @@ jobs:
             exit 1
           fi
 
-          components="$HOME/Library/Audio/Plug-Ins/Components"
-          mkdir -p "$components"
+          components=/Library/Audio/Plug-Ins/Components
+          sudo mkdir -p "$components"
           test ! -e "$components/RatBox26.component"
-          ditto "$package/RatBox26.component" "$components/RatBox26.component"
-          killall AudioComponentRegistrar 2>/dev/null || true
-          component='aufx[[:space:]]+Rb26[[:space:]]+RtbA'
+          sudo ditto "$package/RatBox26.component" "$components/RatBox26.component"
+          rm -f "$HOME/Library/Caches/AudioUnitCache/com.apple.audiounits.cache" \
+            "$HOME/Library/Caches/AudioUnitCache/com.apple.audiounits.sandboxed.cache"
+          sudo killall AudioComponentRegistrar 2>/dev/null || true
+          # A fresh registrar can take a few seconds to discover the installed component.
           for attempt in 1 2 3 4 5; do
-            if auval -a > "$tools/au-components.log" && grep -Eq "$component" "$tools/au-components.log"; then
-              break
+            if auval -v aufx Rb26 RtbA 2>&1 | tee "$tools/auval.log" &&
+                grep -Fq 'AU VALIDATION SUCCEEDED' "$tools/auval.log"; then
+              exit 0
             fi
-            sleep 2
+            sleep 3
           done
-          grep -E "$component" "$tools/au-components.log"
-          auval -v aufx Rb26 RtbA | tee "$tools/auval.log"
-          grep -F 'AU VALIDATION SUCCEEDED' "$tools/auval.log"
+          detail=$(grep -im1 -E 'error|fail|cannot|not found' "$tools/auval.log" || true)
+          echo "::error title=Audio Unit validation on $architecture::${detail:-RatBox26 did not pass auval. See the validation step output.}"
+          exit 1
           EOF
           tar -czf "$transport/ratbox-validation.tar.gz" -C "$root" validation
 
