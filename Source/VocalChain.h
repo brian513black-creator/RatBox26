@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
 #include <vector>
 
 namespace ratbox {
@@ -73,19 +74,25 @@ public:
 
     Meters process(float* left, float* right, int frames, const Settings& target) {
         Meters meters;
-        std::array<std::array<float, 4>, 2> feedback{};
-        for (size_t channel = 0; channel < rooms.size(); ++channel)
-            for (size_t i = 0; i < rooms[channel].combs.size(); ++i)
-                feedback[channel][i] = std::pow(.001f, static_cast<float>(
-                    rooms[channel].combs[i].samples.size()) / (rate * target.decay));
+        if (std::islessgreater(target.decay, cachedDecay)) {
+            const float decaySamples = rate * target.decay;
+            for (auto& room : rooms)
+                for (auto& comb : room.combs)
+                    comb.feedbackTarget = std::pow(.001f, static_cast<float>(comb.samples.size()) / decaySamples);
+            cachedDecay = target.decay;
+        }
 
-        const float cutoffTarget = cutoffCoefficient(target.lowCut);
-        const float focusTarget = cutoffCoefficient(target.focusHz);
-        const float focusGainTarget = std::pow(10.f, target.focusDb / 20.f) - 1.f;
-        const float inputGainTarget = std::pow(10.f, target.inputTrimDb / 20.f);
-        const float outTarget = std::pow(10.f, target.output / 20.f);
+        const auto frequencyToCoefficient = [this](float hz) { return cutoffCoefficient(hz); };
+        const auto decibelsToGain = [](float db) { return std::pow(10.f, db / 20.f); };
+        const float cutoffTarget = cutoffCache.get(target.lowCut, frequencyToCoefficient);
+        const float focusTarget = focusFrequencyCache.get(target.focusHz, frequencyToCoefficient);
+        const float focusGainTarget = focusGainCache.get(target.focusDb, decibelsToGain) - 1.f;
+        const float inputGainTarget = inputGainCache.get(target.inputTrimDb, decibelsToGain);
+        const float outTarget = outputGainCache.get(target.output, decibelsToGain);
         const float activeTarget = target.bypass ? 0.f : 1.f;
         const float lowCutMixTarget = target.lowCutEnabled ? 1.f : 0.f;
+        const float compThreshold = .25f - .175f * target.comp;
+        const float compExponent = -(.64f * target.comp);
         if (!initialized) {
             lowCutG = cutoffTarget;
             lowCutMix = lowCutMixTarget;
@@ -96,24 +103,38 @@ public:
             inputGain = inputGainTarget;
             outGain = outTarget;
             active = activeTarget;
-            for (size_t channel = 0; channel < rooms.size(); ++channel)
-                for (size_t i = 0; i < rooms[channel].combs.size(); ++i)
-                    rooms[channel].combs[i].feedback = feedback[channel][i];
+            for (auto& room : rooms)
+                for (auto& comb : room.combs)
+                    comb.feedback = comb.feedbackTarget;
             initialized = true;
         }
+        constexpr float damping = 1.41421356f;
+        float lowCutA1 = filterNormalization(lowCutG, damping);
+        // Match the bell's boost and cut curves by exchanging the pole and zero damping.
+        float focusDamping = focusDampingFor(focusGain);
+        float focusA1 = filterNormalization(focusG, focusDamping);
+        bool changingCutoff = std::islessgreater(lowCutG, cutoffTarget);
+        bool changingFocus = std::islessgreater(focusG, focusTarget) ||
+                             std::islessgreater(focusGain, focusGainTarget);
         for (int frame = 0; frame < frames; ++frame) {
             float dry[2] = {safe(left[frame]), right ? safe(right[frame]) : safe(left[frame])};
             float clean[2], high[2];
             follow(inputGain, inputGainTarget, smooth);
-            follow(lowCutG, cutoffTarget, smooth);
+            if (changingCutoff) {
+                changingCutoff = smoothCoefficient(lowCutG, cutoffTarget);
+                if (changingCutoff)
+                    lowCutA1 = filterNormalization(lowCutG, damping);
+            }
             lowCutMix += std::clamp(lowCutMixTarget - lowCutMix, -switchStep, switchStep);
-            follow(focusG, focusTarget, smooth);
-            follow(focusGain, focusGainTarget, smooth);
-            // Match the bell's boost and cut curves by exchanging the pole and zero damping.
-            const float focusDamping = (1.f / 1.15f) / std::sqrt(1.f + focusGain);
-            const float focusA1 = 1.f / (1.f + focusG * (focusG + focusDamping));
-            constexpr float damping = 1.41421356f;
-            const float a1 = 1.f / (1.f + lowCutG * (lowCutG + damping));
+            if (changingFocus) {
+                const bool frequencyChanged = smoothCoefficient(focusG, focusTarget);
+                const bool gainChanged = smoothCoefficient(focusGain, focusGainTarget);
+                changingFocus = frequencyChanged || gainChanged;
+                if (changingFocus) {
+                    focusDamping = focusDampingFor(focusGain);
+                    focusA1 = filterNormalization(focusG, focusDamping);
+                }
+            }
             float levels[2], highLevels[2];
             float input = 0.f;
             float speech = 0.f;
@@ -121,7 +142,7 @@ public:
                 auto& state = channels[channel];
                 const float source = std::clamp(dry[channel] * inputGain, -64.f, 64.f);
                 input = std::max(input, std::abs(source));
-                const float v1 = a1 * (state.integrator1 + lowCutG * (source - state.integrator2));
+                const float v1 = lowCutA1 * (state.integrator1 + lowCutG * (source - state.integrator2));
                 const float v2 = state.integrator2 + lowCutG * v1;
                 state.integrator1 = 2.f * v1 - state.integrator1;
                 state.integrator2 = 2.f * v2 - state.integrator2;
@@ -166,6 +187,7 @@ public:
             follow(wet, target.space, smooth);
             follow(outGain, outTarget, smooth);
             active += std::clamp(activeTarget - active, -switchStep, switchStep);
+            const float drive = 1.f + .65f * tone;
 
             for (size_t channel = 0; channel < 2; ++channel) {
                 auto& state = channels[channel];
@@ -182,17 +204,14 @@ public:
                 const float bodyV = (x - state.colourLow) * colourPole;
                 const float body = state.colourLow + bodyV;
                 state.colourLow = body + bodyV;
-                const float drive = 1.f + .65f * tone;
-                const float colored = std::tanh(body * drive) / drive;
-                clean[channel] = x + .4f * tone * (colored - body);
+                clean[channel] = tone > 0.f ? x + .4f * tone * saturationResidual(body, drive) : x;
             }
 
             const float shaped = std::max(std::abs(clean[0]), std::abs(clean[1]));
             envelope(compPower, shaped * shaped, fast, release);
             const float compLevel = std::sqrt(compPower);
-            const float threshold = .25f - .175f * target.comp;
-            const float over = std::max(1.f, compLevel / threshold);
-            const float compTarget = std::pow(over, -(.64f * target.comp));
+            const float compTarget = compExponent < 0.f && compLevel > compThreshold
+                ? std::pow(compLevel / compThreshold, compExponent) : 1.f;
             follow(compGain, compTarget, compTarget < compGain ? compAttack : compRelease);
             for (auto& sample : clean) sample *= compGain;
 
@@ -204,11 +223,10 @@ public:
                 auto& room = rooms[channel];
                 const float predelayed = room.pre.exchange(sends[channel]);
                 float reflected = 0;
-                for (size_t i = 0; i < room.combs.size(); ++i) {
-                    auto& comb = room.combs[i];
+                for (auto& comb : room.combs) {
                     const float previous = comb.read();
                     follow(comb.damped, previous, roomDamping);
-                    follow(comb.feedback, feedback[channel][i], smooth);
+                    follow(comb.feedback, comb.feedbackTarget, smooth);
                     comb.exchange(predelayed + comb.damped * comb.feedback);
                     reflected += previous * .25f;
                 }
@@ -239,10 +257,23 @@ public:
     }
 
 private:
+    struct CachedCoefficient {
+        template <typename Convert>
+        float get(float setting, Convert convert) {
+            if (std::islessgreater(setting, previous)) {
+                value = convert(setting);
+                previous = setting;
+            }
+            return value;
+        }
+
+        float previous = std::numeric_limits<float>::infinity(), value = 0.f;
+    };
+
     struct Delay {
         std::vector<float> samples;
         size_t cursor = 0;
-        float damped = 0, feedback = 0;
+        float damped = 0, feedback = 0, feedbackTarget = 0;
         void clear() {
             std::fill(samples.begin(), samples.end(), 0.f);
             cursor = 0;
@@ -272,6 +303,17 @@ private:
         float noiseFloor = .0015f;
     };
 
+    static float saturationResidual(float body, float drive) {
+        const float driven = body * drive;
+        const float square = driven * driven;
+        if (square > 1.f)
+            return std::tanh(driven) / drive - body;
+
+        // The [5/4] Padé curve for tanh, with the dry term subtracted analytically.
+        return -body * square * (315.f + 14.f * square) /
+            (945.f + square * (420.f + 15.f * square));
+    }
+
     static float safe(float x) { return std::isfinite(x) ? x : 0.f; }
     static float follow(float& state, float value, float coefficient) {
         state += coefficient * (value - state);
@@ -280,12 +322,25 @@ private:
     static void envelope(float& state, float value, float attack, float release) {
         follow(state, value, value > state ? attack : release);
     }
+    bool smoothCoefficient(float& state, float target) const {
+        const float previous = state;
+        follow(state, target, smooth);
+        return std::islessgreater(state, previous);
+    }
+    static float filterNormalization(float coefficient, float damping) {
+        return 1.f / (1.f + coefficient * (coefficient + damping));
+    }
+    static float focusDampingFor(float gain) {
+        return (1.f / 1.15f) / std::sqrt(1.f + gain);
+    }
     float cutoffCoefficient(float hz) const { return std::tan(3.14159265f * std::min(hz / rate, .45f)); }
     float time(float seconds) const { return 1.f - std::exp(-1.f / (rate * seconds)); }
     float filter(float hz) const { return time(1.f / (6.2831853f * hz)); }
 
     std::array<Channel, 2> channels;
     std::array<Room, 2> rooms;
+    CachedCoefficient cutoffCache, focusFrequencyCache, focusGainCache, inputGainCache, outputGainCache;
+    float cachedDecay = std::numeric_limits<float>::infinity();
     float rate = 48000, lowCutG = 0, presence = 0, air = 0, sibilance = 0;
     bool initialized = false;
     float wetLow = 0, wetHigh = 0, roomDamping = 0, fast = 0, release = 0, smooth = 0;

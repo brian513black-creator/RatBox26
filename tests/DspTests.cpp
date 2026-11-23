@@ -429,6 +429,26 @@ void testReverbLevelAndDecay(double rate) {
     require(levelError < 1.e-6 * longEnergy, "Reverb level should scale the wet signal");
 }
 
+void testCharacterCurve() {
+    auto settings = neutral();
+    settings.lowCutEnabled = false;
+    settings.character = 1.f;
+    ratbox::VocalChain dsp;
+    dsp.prepare(48000.);
+    constexpr float drive = 1.65f;
+    std::array<float, block> audio{};
+    for (const float input : {.12f, .60f, .61f, .85f, -.60f}) {
+        dsp.reset();
+        for (int b = 0; b < 24; ++b) {
+            audio.fill(input);
+            dsp.process(audio.data(), nullptr, block, settings);
+        }
+        const float expected = input + .4f * (std::tanh(input * drive) / drive - input);
+        require(std::abs(audio.back() - expected) < .000002f,
+                "Character should match its saturation curve on both sides of the fast-path cutoff");
+    }
+}
+
 void testCharacterFoldback() {
     constexpr int rate = 44100;
     constexpr int frequency = 13000;
@@ -493,6 +513,7 @@ void testBypassAndSafety(double rate) {
 } // namespace
 
 int main() {
+    testCharacterCurve();
     testCharacterFoldback();
     for (const auto rate : {44100., 48000., 96000.}) {
         testLowCutAndDynamics(rate);
